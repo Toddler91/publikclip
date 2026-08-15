@@ -46,6 +46,17 @@ class IngestStage(Stage):
         def prog(fraction: float, message: str) -> None:
             ctx.emit(fraction, message)
 
+        # Every path below this point shells out to ffmpeg/ffprobe (merge,
+        # probe, CFR re-encode, analysis audio). Fetch one now if the machine
+        # has none — waiting until the render stage is too late.
+        from ..render import ffmpeg_bin
+
+        if ffmpeg_bin.ensure_present(prog) is None:
+            raise StageError(
+                "No ffmpeg available, and one could not be downloaded. "
+                "Check your connection, or install ffmpeg and retry."
+            )
+
         heatmap = None
         title = None
         if job.source_type == "url":

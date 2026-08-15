@@ -54,8 +54,7 @@ def _has_subtitles_filter(binary: str) -> bool:
 
 
 @lru_cache(maxsize=1)
-def resolve() -> tuple[str, bool]:
-    """(ffmpeg_path, has_subtitles)."""
+def _resolve() -> tuple[str, bool]:
     candidates: list[str] = []
     env = os.environ.get("PUBLIKCLIP_FFMPEG")
     if env:
@@ -78,6 +77,22 @@ def resolve() -> tuple[str, bool]:
         if _has_subtitles_filter(cand):
             return cand, True
     return (fallback or "ffmpeg"), False
+
+
+def resolve() -> tuple[str, bool]:
+    """(ffmpeg_path, has_subtitles).
+
+    The bare-name fallback returned when no binary exists anywhere is never
+    cached: it is a negative result that ensure_capable() is expected to fix
+    by downloading one, and a stuck "ffmpeg" would survive that download.
+    """
+    result = _resolve()
+    if not os.path.exists(result[0]):
+        _resolve.cache_clear()
+    return result
+
+
+resolve.cache_clear = _resolve.cache_clear  # type: ignore[attr-defined]
 
 
 def ffmpeg() -> str:
@@ -162,6 +177,40 @@ def _ensure_capable_windows(progress) -> bool:
     finally:
         zpath.unlink(missing_ok=True)
     return all(dest.exists() for dest in wanted.values())
+
+
+def add_to_path() -> None:
+    """Put the resolved ffmpeg's directory on PATH for this process.
+
+    Third-party libraries shell out to a bare `ffmpeg`/`ffprobe` rather than
+    taking a configurable path — whisperX's load_audio is the one that bites
+    first — so a machine whose only ffmpeg is our downloaded static build
+    raises FileNotFoundError deep inside someone else's code. Resolving is not
+    enough; the name has to be findable."""
+    path = ffmpeg()
+    if not os.path.exists(path):
+        return  # bare-name fallback; nothing real to point PATH at yet
+    directory = os.path.dirname(os.path.abspath(path))
+    entries = os.environ.get("PATH", "").split(os.pathsep)
+    if directory not in entries:
+        os.environ["PATH"] = os.pathsep.join([directory, *entries])
+
+
+def ensure_present(progress=None) -> str | None:
+    """Return a path to *some* usable ffmpeg, fetching the static build if the
+    machine has none. Ingest only needs to remux and decode, so an ffmpeg
+    without libass still counts — unlike ensure_capable(), which insists on
+    caption support. Returns None when no binary could be obtained."""
+    path = ffmpeg()
+    if os.path.exists(path):
+        add_to_path()
+        return path
+    ensure_capable(progress)
+    path = ffmpeg()
+    if not os.path.exists(path):
+        return None
+    add_to_path()
+    return path
 
 
 def ensure_capable(progress=None) -> bool:

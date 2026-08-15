@@ -248,6 +248,14 @@ class Stage:
 def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[str, dict]:
     """Run stages in order, skipping fresh checkpoints. Returns stage→data."""
     settings = config.Settings.from_json(json.loads(job.settings_json))
+    # Libraries we call shell out to a bare `ffmpeg` (whisperX's load_audio),
+    # so the managed binary has to be findable by name in every stage — not
+    # only the ones that resolve it explicitly. Ingest downloads it when
+    # missing; on a resumed job ingest is cached and skipped, so point PATH at
+    # whatever is already on disk here.
+    from ..render import ffmpeg_bin
+
+    ffmpeg_bin.add_to_path()
     ctx = StageContext(job=job, settings=settings, progress=progress)
     results: dict[str, dict] = {}
     set_job_status(job.id, "running")

@@ -18,7 +18,6 @@ import json
 import os
 import platform
 import re
-import shutil
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -243,7 +242,19 @@ _PCT_RE = re.compile(r"\[download\]\s+([\d.]+)%")
 
 def download(url: str, out_path: Path, progress: ProgressFn) -> None:
     bin_path = ensure_ytdlp(progress)
-    ffmpeg = shutil.which("ffmpeg")
+    # DOWNLOAD_FORMAT asks for separate video+audio streams, so yt-dlp needs
+    # ffmpeg to merge them. Without it, it warns (suppressed by --no-warnings)
+    # and exits 0 leaving media.fNNN.mp4 + media.fNNN.m4a unmerged — so resolve
+    # through the same chain the rest of the pipeline uses, fetching the static
+    # build if this machine has no ffmpeg at all, rather than PATH-only lookup.
+    from ..render import ffmpeg_bin
+
+    ffmpeg = ffmpeg_bin.ensure_present(progress)
+    if not ffmpeg:
+        raise YtDlpError(
+            "No ffmpeg available, and one could not be downloaded. "
+            "Check your connection, or install ffmpeg and retry."
+        )
     args = [
         "-f", DOWNLOAD_FORMAT,
         "--merge-output-format", "mp4",
@@ -251,10 +262,9 @@ def download(url: str, out_path: Path, progress: ProgressFn) -> None:
         "--no-warnings",
         "--newline",
         "--socket-timeout", "30",
+        "--ffmpeg-location", ffmpeg,
+        "-o", str(out_path), url,
     ]
-    if ffmpeg:
-        args += ["--ffmpeg-location", ffmpeg]
-    args += ["-o", str(out_path), url]
 
     def _on_line(line: str) -> None:
         m = _PCT_RE.search(line)
@@ -273,5 +283,13 @@ def download(url: str, out_path: Path, progress: ProgressFn) -> None:
         candidates = list(out_path.parent.glob(out_path.name + ".*"))
         if candidates:
             candidates[0].replace(out_path)
-        else:
-            raise YtDlpError("Download finished but no output file was produced.")
+            return
+        # Per-format leftovers (media.f299.mp4 + media.f140.m4a) mean the
+        # streams downloaded fine but the merge never ran. Name that, instead
+        # of the unhelpful generic message.
+        if list(out_path.parent.glob(f"{out_path.stem}.f*")):
+            raise YtDlpError(
+                "The video and audio streams downloaded but could not be merged "
+                "(ffmpeg was unavailable). Resume the job to finish the merge."
+            )
+        raise YtDlpError("Download finished but no output file was produced.")

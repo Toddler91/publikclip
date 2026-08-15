@@ -30,9 +30,16 @@ class FfmpegError(Exception):
 
 
 def _run(args: list[str], timeout: float) -> subprocess.CompletedProcess:
-    proc = subprocess.run(
-        args, capture_output=True, text=True, timeout=timeout
-    )
+    try:
+        proc = subprocess.run(
+            args, capture_output=True, text=True, timeout=timeout
+        )
+    except FileNotFoundError as err:
+        # ffmpeg_bin falls back to the bare name when nothing is installed;
+        # surface that as a stage error rather than an unhandled OSError.
+        raise FfmpegError(
+            f"{args[0]} not found. publikclip needs ffmpeg to process media."
+        ) from err
     if proc.returncode != 0:
         tail = (proc.stderr or "")[-4000:]
         raise FfmpegError(f"{args[0]} failed ({proc.returncode}): {tail}")
