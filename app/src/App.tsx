@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { api } from './api'
-import type { JobResults, JobSummary, PipelineEvent, SetupState } from './types'
+import type { JobResults, JobSummary, PipelineEvent, SessionState, SetupState } from './types'
 import Onboarding from './components/Onboarding'
 import Studio from './components/Studio'
 import Review from './components/Review'
@@ -19,12 +19,36 @@ export default function App() {
   const [stages, setStages] = useState<Record<string, { fraction: number; message: string }>>({})
   const [running, setRunning] = useState(false)
   const [runError, setRunError] = useState<string | null>(null)
+  const [sessions, setSessions] = useState<Record<string, SessionState>>({})
   const unlistenRef = useRef<(() => void) | null>(null)
   const activeJobRef = useRef<string | null>(null)
   activeJobRef.current = activeJob
 
   const refreshJobs = useCallback(() => {
     api.listJobs().then(setJobs).catch(() => setJobs([]))
+  }, [])
+
+  // Live process state per job. Polled rather than pushed: a session can be
+  // paused, killed, or left over from a previous app instance, and none of
+  // those produce a pipeline event.
+  useEffect(() => {
+    const poll = () => {
+      api.sessionStates().then(setSessions).catch(() => setSessions({}))
+    }
+    poll()
+    const timer = window.setInterval(poll, 2000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  const controlSession = useCallback(async (id: string, action: 'pause' | 'unpause' | 'stop') => {
+    try {
+      if (action === 'pause') await api.pauseJob(id)
+      else if (action === 'unpause') await api.unpauseJob(id)
+      else await api.stopJob(id)
+    } catch (err) {
+      setRunError(String(err))
+    }
+    api.sessionStates().then(setSessions).catch(() => undefined)
   }, [])
 
   useEffect(() => {
@@ -149,6 +173,8 @@ export default function App() {
   return (
     <Studio
       jobs={jobs}
+      sessions={sessions}
+      onControlSession={controlSession}
       running={running}
       stages={stages}
       error={runError}

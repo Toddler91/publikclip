@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { JobSummary } from '../types'
+import type { JobSummary, SessionState } from '../types'
 import KeyModal from './KeyModal'
 
 const STAGE_ORDER = [
@@ -21,6 +21,8 @@ const CAPTION_PRESETS = ['classic', 'beast', 'hormozi', 'minimal', 'karaoke-pop'
 
 interface Props {
   jobs: JobSummary[]
+  sessions: Record<string, SessionState>
+  onControlSession: (id: string, action: 'pause' | 'unpause' | 'stop') => void
   running: boolean
   stages: Record<string, { fraction: number; message: string }>
   error: string | null
@@ -30,7 +32,10 @@ interface Props {
   onResume: (id: string, llm?: string) => void
 }
 
-export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop, onOpenJob, onResume }: Props) {
+export default function Studio({
+  jobs, sessions, onControlSession, running, stages, error,
+  onRun, onOpenLoop, onOpenJob, onResume
+}: Props) {
   const [source, setSource] = useState('')
   const [llm, setLlm] = useState('gemini')
   const [captions, setCaptions] = useState('classic')
@@ -48,19 +53,64 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
         <div className="rail-jobs">
           <p className="rail-label">SESSIONS</p>
           {jobs.length === 0 && <p className="rail-empty">nothing yet</p>}
-          {jobs.map((job) => (
-            <button
-              key={job.id}
-              className={`rail-job ${job.rendered ? '' : 'partial'}`}
-              onClick={() => (job.rendered ? onOpenJob(job.id) : onResume(job.id))}
-              disabled={running}
-              title={job.rendered ? 'open results' : 'resume from checkpoint'}
-            >
-              <span className={`led ${job.rendered ? 'led-on' : 'led-half'}`} />
-              <span className="rail-job-title">{job.title ?? job.id}</span>
-              <span className="rail-job-hint">{job.rendered ? 'open' : 'resume'}</span>
-            </button>
-          ))}
+          {jobs.map((job) => {
+            const live = sessions[job.id]
+            const led = live
+              ? live.state === 'paused' ? 'led-paused' : 'led-live'
+              : job.rendered ? 'led-on' : 'led-half'
+            return (
+              <div key={job.id} className={`rail-job-row ${live ? 'is-live' : ''}`}>
+                <button
+                  className={`rail-job ${job.rendered ? '' : 'partial'}`}
+                  onClick={() => (job.rendered ? onOpenJob(job.id) : onResume(job.id))}
+                  // A live session must not be resumed again — that is exactly
+                  // how two processes end up on one job.
+                  disabled={running || Boolean(live)}
+                  title={
+                    live ? `${live.state} — ${live.stage ?? 'working'} (pid ${live.pid})`
+                      : job.rendered ? 'open results' : 'resume from checkpoint'
+                  }
+                >
+                  <span className={`led ${led}`} />
+                  <span className="rail-job-title">{job.title ?? job.id}</span>
+                  <span className="rail-job-hint">
+                    {live ? (live.state === 'paused' ? 'paused' : live.stage ?? 'running')
+                      : job.rendered ? 'open' : 'resume'}
+                  </span>
+                </button>
+                {live && (
+                  <div className="rail-job-controls">
+                    {live.controllable ? (
+                      <>
+                        <button
+                          className="ctl"
+                          title={live.state === 'paused' ? 'continue' : 'pause'}
+                          onClick={() =>
+                            onControlSession(job.id, live.state === 'paused' ? 'unpause' : 'pause')
+                          }
+                        >
+                          {live.state === 'paused' ? '▶' : '❚❚'}
+                        </button>
+                        <button
+                          className="ctl ctl-stop"
+                          title="stop — keeps finished chunks, resume picks up there"
+                          onClick={() => onControlSession(job.id, 'stop')}
+                        >
+                          ■
+                        </button>
+                      </>
+                    ) : (
+                      // Started by an earlier app instance: visible, but this
+                      // process has no handle on it to signal.
+                      <span className="ctl-note" title={`pid ${live.pid} — not started by this app window`}>
+                        external
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
         <footer className="rail-foot">
           <button className="btn-ghost" onClick={() => setShowKey(true)}>

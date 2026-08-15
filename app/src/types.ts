@@ -77,6 +77,16 @@ export interface JobSummary {
   rendered: boolean
 }
 
+/** Live process state for a job, from its run lock + the process table.
+ *  `controllable` is false for a session this app did not spawn (left over
+ *  from a previous app instance) — we can see it, but cannot signal it. */
+export interface SessionState {
+  pid: number
+  state: 'running' | 'paused'
+  stage: string | null
+  controllable: boolean
+}
+
 export interface SetupState {
   has_gemini_key: boolean
   onboarded: boolean

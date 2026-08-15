@@ -1,5 +1,5 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
-import type { JobResults, JobSummary, LoopOverview, SetupState, SyncSummary } from './types'
+import type { JobResults, JobSummary, LoopOverview, SessionState, SetupState, SyncSummary } from './types'
 
 export const api = {
   runJob: (source: string, llm: string, captions: string) =>
@@ -8,6 +8,10 @@ export const api = {
     invoke<void>('resume_job', { jobId, llm, captions, camera }),
   jobResults: (jobId: string) => invoke<JobResults>('job_results', { jobId }),
   listJobs: () => invoke<JobSummary[]>('list_job_dirs'),
+  sessionStates: () => invoke<Record<string, SessionState>>('session_states'),
+  pauseJob: (jobId: string) => invoke<void>('pause_job', { jobId }),
+  unpauseJob: (jobId: string) => invoke<void>('unpause_job', { jobId }),
+  stopJob: (jobId: string) => invoke<void>('stop_job', { jobId }),
   saveGeminiKey: (key: string) => invoke<boolean>('save_gemini_key', { key }),
   setupState: () => invoke<SetupState>('get_setup_state'),
   markOnboarded: () => invoke<void>('mark_onboarded'),

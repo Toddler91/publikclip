@@ -12,7 +12,7 @@ import json
 import sys
 
 from . import config
-from .jobs import queue
+from .jobs import queue, runlock, supervise
 
 
 def _stages() -> list[queue.Stage]:
@@ -100,11 +100,17 @@ def cmd_resume(args: argparse.Namespace) -> int:
 def _execute(job: queue.Job, jsonl: bool) -> int:
     emit = _progress_printer(jsonl)
     if jsonl:
+        # Sidecar mode: exit if the app reading our stdout goes away, rather
+        # than transcribing on for nobody and colliding with the next run.
+        supervise.die_with_parent()
         print(json.dumps({"event": "job", "job_id": job.id, "dir": str(job.dir)}), flush=True)
     else:
         print(f"job {job.id} → {job.dir}", file=sys.stderr)
     try:
         results = queue.run_stages(job, _stages(), emit)
+    except runlock.JobBusyError as err:
+        _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": str(err), "busy": True})
+        return 4
     except queue.StageError as err:
         _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": str(err)})
         return 1
@@ -124,6 +130,37 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         stages = queue.stage_statuses(job.id)
         done = sum(1 for s in stages.values() if s == "done")
         print(f"{job.id}  {job.status:<8} {done} stage(s) done  {job.title or job.source}")
+    return 0
+
+
+def cmd_sessions(args: argparse.Namespace) -> int:
+    """Every job with its *real* state — what the process table says, not what
+    the DB last managed to record. JSON for the app, a table for humans."""
+    rows = []
+    for job in queue.list_jobs():
+        lock = runlock.owner(job.dir)
+        stages = queue.stage_statuses(job.id)
+        rows.append({
+            "job_id": job.id,
+            "title": job.title,
+            "state": queue.job_state(job.id),
+            "stage": (lock.stage if lock else None)
+            or next((s for s, st in stages.items() if st == "running"), None),
+            "pid": lock.pid if lock else None,
+            "started_at": lock.started_at if lock else None,
+            "stages": stages,
+            "error": job.error,
+        })
+    if getattr(args, "json", False):
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print("no jobs yet")
+        return 0
+    for r in rows:
+        pid = f"pid {r['pid']}" if r["pid"] else "-"
+        stage = r["stage"] or "-"
+        print(f"{r['state']:<12} {stage:<11} {pid:<10} {r['job_id']}  {r['title'] or ''}")
     return 0
 
 
@@ -298,6 +335,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p_jobs = sub.add_parser("jobs", help="list jobs")
     p_jobs.set_defaults(fn=cmd_jobs)
+
+    p_sessions = sub.add_parser("sessions", help="jobs with their live process state")
+    p_sessions.add_argument("--json", action="store_true", help="machine-readable")
+    p_sessions.set_defaults(fn=cmd_sessions)
 
     p_edit = sub.add_parser("edit", help="per-clip editing (context / visuals / render)")
     edit_sub = p_edit.add_subparsers(dest="edit_cmd", required=True)

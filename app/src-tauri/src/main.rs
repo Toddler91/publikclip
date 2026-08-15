@@ -3,13 +3,86 @@
 // event to the frontend, and exposes small filesystem/settings commands.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, RunEvent};
+
+/// Pipeline children we spawned, job id -> pid.
+///
+/// Without this the app has no handle on its own sidecars: quitting left a
+/// transcription running forever, reparented to pid 1, and the next Resume
+/// started a second copy of the same job on top of it.
+fn children() -> &'static Mutex<HashMap<String, u32>> {
+    static CHILDREN: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+    CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_child(job_id: &str, pid: u32) {
+    if let Ok(mut map) = children().lock() {
+        map.insert(job_id.to_string(), pid);
+    }
+}
+
+fn unregister_child(pid: u32) {
+    if let Ok(mut map) = children().lock() {
+        map.retain(|_, v| *v != pid);
+    }
+}
+
+fn pid_for_job(job_id: &str) -> Option<u32> {
+    children().lock().ok()?.get(job_id).copied()
+}
+
+/// Send a signal to a pipeline process tree.
+///
+/// Signals go through `kill(1)` rather than adding a libc dependency, and
+/// target the process group first (negative pid): the real work runs in a
+/// python child of the `uv` wrapper we spawned, so signalling only the wrapper
+/// would leave the transcription running.
+#[cfg(unix)]
+fn signal_process(pid: u32, sig: &str) -> Result<(), String> {
+    let group = Command::new("kill")
+        .args([format!("-{sig}"), format!("-{pid}")])
+        .status();
+    if matches!(group, Ok(s) if s.success()) {
+        return Ok(());
+    }
+    // Not a process group leader — fall back to the pid itself.
+    match Command::new("kill").args([format!("-{sig}"), pid.to_string()]).status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("kill -{sig} {pid} exited with {status}")),
+        Err(err) => Err(format!("could not signal {pid}: {err}")),
+    }
+}
+
+#[cfg(windows)]
+fn signal_process(pid: u32, sig: &str) -> Result<(), String> {
+    // Windows has no SIGSTOP/SIGCONT; only termination is expressible.
+    if sig != "TERM" && sig != "KILL" {
+        return Err("pausing is not supported on Windows".to_string());
+    }
+    match Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("taskkill exited with {status}")),
+        Err(err) => Err(format!("could not stop {pid}: {err}")),
+    }
+}
+
+fn stop_all_children() {
+    let pids: Vec<u32> = match children().lock() {
+        Ok(map) => map.values().copied().collect(),
+        Err(_) => return,
+    };
+    for pid in pids {
+        let _ = signal_process(pid, "TERM");
+    }
+}
 
 fn home_dir() -> PathBuf {
     if let Ok(custom) = std::env::var("PUBLIKCLIP_HOME") {
@@ -102,7 +175,7 @@ fn run_job(app: AppHandle, source: String, llm: Option<String>, captions: Option
             args.push("--captions".to_string());
             args.push(preset);
         }
-        stream_pipeline(&app, &program, &args);
+        stream_pipeline(&app, &program, &args, None);
     });
     Ok(())
 }
@@ -116,6 +189,7 @@ fn resume_job(
     camera: Option<String>,
 ) -> Result<(), String> {
     let (program, base_args) = pipeline_invocation();
+    let tracked = job_id.clone();
     std::thread::spawn(move || {
         let mut args = base_args.clone();
         args.push("--jsonl".to_string());
@@ -133,18 +207,22 @@ fn resume_job(
             args.push("--camera".to_string());
             args.push(cam);
         }
-        stream_pipeline(&app, &program, &args);
+        stream_pipeline(&app, &program, &args, Some(tracked));
     });
     Ok(())
 }
 
-fn stream_pipeline(app: &AppHandle, program: &str, args: &[String]) {
-    let child = quiet_command(program)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn();
-    let mut child = match child {
+fn stream_pipeline(app: &AppHandle, program: &str, args: &[String], job_id: Option<String>) {
+    let mut command = quiet_command(program);
+    command.args(args).stdout(Stdio::piped()).stderr(Stdio::null());
+    // Own process group, so pause/stop can signal the whole tree with a
+    // negative pid. The work runs in a python grandchild of this `uv` wrapper.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = match command.spawn() {
         Ok(c) => c,
         Err(err) => {
             let _ = app.emit(
@@ -154,18 +232,120 @@ fn stream_pipeline(app: &AppHandle, program: &str, args: &[String]) {
             return;
         }
     };
+
+    let pid = child.id();
+    if let Some(id) = job_id.as_ref() {
+        register_child(id, pid);
+    }
+
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                // `run` only learns its job id once the pipeline mints it.
+                if value.get("event").and_then(Value::as_str) == Some("job") {
+                    if let Some(id) = value.get("job_id").and_then(Value::as_str) {
+                        register_child(id, pid);
+                    }
+                }
+                // Heartbeats exist so the pipeline notices a dead app; the UI
+                // has no use for them.
+                if value.get("event").and_then(Value::as_str) == Some("heartbeat") {
+                    continue;
+                }
                 let _ = app.emit("pipeline-event", value);
             }
         }
     }
-    if let Ok(status) = child.wait() {
+    let status = child.wait();
+    unregister_child(pid);
+    if let Ok(status) = status {
         if !status.success() {
             let _ = app.emit("pipeline-event", json!({"event": "exited", "code": status.code()}));
         }
     }
+}
+
+/// Live state of every job, read from the run locks the pipeline writes.
+///
+/// The DB records intent and cannot be trusted for this: a job killed
+/// mid-stage still says "running" forever, because nothing survived to write
+/// otherwise. The lock file plus the process table are the truth.
+#[tauri::command]
+fn session_states() -> Result<Value, String> {
+    let jobs_dir = home_dir().join("jobs");
+    let entries = match fs::read_dir(&jobs_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(json!({})),
+    };
+
+    let mut locks: Vec<(String, u32, Option<String>)> = Vec::new();
+    for entry in entries.flatten() {
+        let job_id = entry.file_name().to_string_lossy().to_string();
+        let Ok(text) = fs::read_to_string(entry.path().join("run.lock")) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let Some(pid) = value.get("pid").and_then(Value::as_u64) else {
+            continue;
+        };
+        let stage = value.get("stage").and_then(Value::as_str).map(str::to_string);
+        locks.push((job_id, pid as u32, stage));
+    }
+    if locks.is_empty() {
+        return Ok(json!({}));
+    }
+
+    // One `ps` for every pid at once: state letter T means SIGSTOP-suspended,
+    // and a pid missing from the output is a stale lock whose owner is gone.
+    let mut states: HashMap<u32, String> = HashMap::new();
+    #[cfg(unix)]
+    {
+        let pid_list: Vec<String> = locks.iter().map(|(_, p, _)| p.to_string()).collect();
+        if let Ok(out) = Command::new("ps").arg("-o").arg("pid=,stat=").arg("-p").arg(pid_list.join(",")).output() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let mut parts = line.split_whitespace();
+                if let (Some(pid), Some(stat)) = (parts.next(), parts.next()) {
+                    if let Ok(pid) = pid.parse::<u32>() {
+                        states.insert(pid, stat.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out = serde_json::Map::new();
+    for (job_id, pid, stage) in locks {
+        let Some(stat) = states.get(&pid) else {
+            continue; // owner died without cleaning up; not a live session
+        };
+        let state = if stat.starts_with('T') { "paused" } else { "running" };
+        let ours = pid_for_job(&job_id).is_some();
+        out.insert(job_id, json!({"pid": pid, "state": state, "stage": stage, "controllable": ours}));
+    }
+    Ok(Value::Object(out))
+}
+
+#[tauri::command]
+fn pause_job(job_id: String) -> Result<(), String> {
+    let pid = pid_for_job(&job_id).ok_or("this job is not running in this app")?;
+    signal_process(pid, "STOP")
+}
+
+#[tauri::command]
+fn unpause_job(job_id: String) -> Result<(), String> {
+    let pid = pid_for_job(&job_id).ok_or("this job is not running in this app")?;
+    signal_process(pid, "CONT")
+}
+
+#[tauri::command]
+fn stop_job(job_id: String) -> Result<(), String> {
+    let pid = pid_for_job(&job_id).ok_or("this job is not running in this app")?;
+    // A suspended process cannot act on SIGTERM until it is resumed, so wake
+    // it first — otherwise "stop" silently does nothing to a paused job.
+    let _ = signal_process(pid, "CONT");
+    signal_process(pid, "TERM")
 }
 
 /// Everything the review UI needs for one job, read straight off the job
@@ -309,7 +489,7 @@ fn run_edit_render(app: AppHandle, job_id: String, clip: u32) -> Result<(), Stri
         args.push("render-clip".to_string());
         args.push(job_id);
         args.push(clip.to_string());
-        stream_pipeline(&app, &program, &args);
+        stream_pipeline(&app, &program, &args, None);
     });
     Ok(())
 }
@@ -457,12 +637,24 @@ fn main() {
             run_edit_render,
             save_clip_edits,
             save_pexels_key,
-            export_clip
+            export_clip,
+            session_states,
+            pause_job,
+            unpause_job,
+            stop_job
         ])
         .setup(|app| {
             let _ = app.get_webview_window("main");
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running publikclip");
+        .build(tauri::generate_context!())
+        .expect("error while running publikclip")
+        .run(|_app, event| {
+            // Take the pipeline down with us. Left alone these children keep
+            // running after the app quits, reparented to pid 1, and the next
+            // launch starts a second copy of the same job on top of them.
+            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                stop_all_children();
+            }
+        });
 }

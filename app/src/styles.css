@@ -283,6 +283,47 @@ body {
   transition: opacity 0.15s;
 }
 .rail-job:hover .rail-job-hint { opacity: 1; }
+.rail-job:disabled { cursor: default; }
+.rail-job:disabled:hover { background: none; }
+
+/* A session with a live process: its state stays legible rather than
+   hover-only, and its transport controls sit outside the row button. */
+.rail-job-row { display: flex; align-items: center; }
+.rail-job-row.is-live { background: rgba(255, 178, 36, 0.05); border-radius: 4px; }
+.rail-job-row.is-live .rail-job-hint { opacity: 1; }
+.rail-job-controls { display: flex; gap: 2px; padding-right: 6px; }
+.ctl {
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--dim);
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 1;
+  padding: 4px 5px;
+  font-family: var(--mono);
+}
+.ctl:hover { color: var(--text); border-color: var(--dim); background: var(--panel-2); }
+.ctl-stop:hover { color: var(--red); border-color: var(--red); }
+.ctl-note {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--faint);
+  padding: 0 4px;
+}
+.led-live {
+  background: var(--green);
+  box-shadow: 0 0 8px rgba(61, 214, 163, 0.7);
+  animation: led-pulse 1.6s ease-in-out infinite;
+}
+.led-paused { background: var(--amber); box-shadow: none; opacity: 0.75; }
+@keyframes led-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .led-live { animation: none; }
+}
 
 .stage-area {
   position: relative;

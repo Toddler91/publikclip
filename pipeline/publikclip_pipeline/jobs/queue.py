@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .. import config
+from . import runlock
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -245,8 +246,37 @@ class Stage:
         return True
 
 
+def job_state(job_id: str) -> str:
+    """What is *actually* happening to this job right now.
+
+    The DB records intent, not truth: a job killed mid-stage still says
+    'running' forever, because nothing got the chance to write otherwise. The
+    run lock knows better, so it wins for live states.
+
+    Returns: running | paused | interrupted | done | failed | pending
+    """
+    job = get_job(job_id)
+    if job is None:
+        return "pending"
+    lock = runlock.owner(job.dir)
+    if lock is not None:
+        return "paused" if lock.paused else "running"
+    if job.status == "running":
+        return "interrupted"  # DB says running, but nobody is
+    return job.status
+
+
 def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[str, dict]:
-    """Run stages in order, skipping fresh checkpoints. Returns stage→data."""
+    """Run stages in order, skipping fresh checkpoints. Returns stage→data.
+
+    Holds the job's run lock for the whole pass, so a second process cannot
+    start the same job and overwrite its checkpoints.
+    """
+    with runlock.hold(job.dir):
+        return _run_stages_locked(job, stages, progress)
+
+
+def _run_stages_locked(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[str, dict]:
     settings = config.Settings.from_json(json.loads(job.settings_json))
     # Libraries we call shell out to a bare `ffmpeg` (whisperX's load_audio),
     # so the managed binary has to be findable by name in every stage — not
@@ -266,6 +296,7 @@ def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[
             progress(stage.name, 1.0, "cached")
             continue
         mark_stage(job.id, stage.name, "running", stage.schema_version)
+        runlock.touch_stage(job.dir, stage.name)
         progress(stage.name, -1.0, "starting")
         try:
             data = stage.run(_ctx_for(ctx, stage.name, results))
