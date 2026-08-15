@@ -4,8 +4,9 @@ import type { JobResults, JobSummary, LoopOverview, SessionState, SetupState, Sy
 export const api = {
   runJob: (source: string, llm: string, captions: string) =>
     invoke<void>('run_job', { source, llm, captions }),
-  resumeJob: (jobId: string, llm?: string, captions?: string, camera?: string) =>
-    invoke<void>('resume_job', { jobId, llm, captions, camera }),
+  resumeJob: (
+    jobId: string, llm?: string, captions?: string, camera?: string, partialOk?: boolean
+  ) => invoke<void>('resume_job', { jobId, llm, captions, camera, partialOk }),
   jobResults: (jobId: string) => invoke<JobResults>('job_results', { jobId }),
   listJobs: () => invoke<JobSummary[]>('list_job_dirs'),
   sessionStates: () => invoke<Record<string, SessionState>>('session_states'),

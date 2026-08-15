@@ -211,6 +211,27 @@ class StageError(Exception):
     """A stage failed in a way the user can act on. Message is user-facing."""
 
 
+class PartialResultError(StageError):
+    """A stage stopped early but kept usable work, and the user can choose to
+    continue with it. Carries the counts so the UI can name the trade
+    ("continue with 19 of 35") instead of offering a blind retry."""
+
+    def __init__(self, message: str, *, done: int, total: int, stage: str, resume_flag: str):
+        super().__init__(message)
+        self.done = done
+        self.total = total
+        self.stage = stage
+        self.resume_flag = resume_flag
+
+    def to_json(self) -> dict:
+        return {
+            "stage": self.stage,
+            "done": self.done,
+            "total": self.total,
+            "resume_flag": self.resume_flag,
+        }
+
+
 ProgressFn = Callable[[str, float, str], None]  # (stage, fraction 0..1 or -1, message)
 
 

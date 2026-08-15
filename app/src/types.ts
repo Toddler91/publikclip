@@ -1,5 +1,14 @@
+/** A stage stopped early but kept usable work; the user can continue with it. */
+export interface PartialResult {
+  stage: string
+  done: number
+  total: number
+  resume_flag: string
+}
+
 export interface PipelineEvent {
   event: string
+  partial?: PartialResult
   stage?: string
   fraction?: number
   message?: string

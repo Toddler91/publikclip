@@ -73,6 +73,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         settings.caption_preset = args.captions
     if args.camera:
         settings.camera.speaker_change = args.camera
+    settings.allow_partial_scoring = bool(getattr(args, "partial_ok", False))
     job = queue.create_job(source_type, source, json.dumps(settings.to_json()))
     return _execute(job, args.jsonl)
 
@@ -82,7 +83,8 @@ def cmd_resume(args: argparse.Namespace) -> int:
     if job is None:
         print(f"No job {args.job_id}", file=sys.stderr)
         return 2
-    if args.llm or args.captions or args.camera:
+    partial_ok = bool(getattr(args, "partial_ok", False))
+    if args.llm or args.captions or args.camera or partial_ok:
         settings = config.Settings.from_json(json.loads(job.settings_json))
         if args.llm:
             settings.llm_mode = args.llm
@@ -90,6 +92,9 @@ def cmd_resume(args: argparse.Namespace) -> int:
             settings.caption_preset = args.captions
         if args.camera:
             settings.camera.speaker_change = args.camera
+        # Sticky only when asked for: a later plain resume goes back to
+        # demanding a complete scoring pass.
+        settings.allow_partial_scoring = partial_ok
         new_json = json.dumps(settings.to_json())
         with queue._connect() as conn:  # noqa: SLF001 — CLI is a queue friend
             conn.execute("UPDATE jobs SET settings_json = ? WHERE id = ?", (new_json, job.id))
@@ -111,6 +116,11 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
     except runlock.JobBusyError as err:
         _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": str(err), "busy": True})
         return 4
+    except queue.PartialResultError as err:
+        _emit_result(jsonl, {
+            "ok": False, "job_id": job.id, "error": str(err), "partial": err.to_json(),
+        })
+        return 1
     except queue.StageError as err:
         _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": str(err)})
         return 1
@@ -324,6 +334,10 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--llm", choices=["gemini", "ollama"], default=None)
     p_run.add_argument("--captions", default=None, help="caption preset name")
     p_run.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
+    p_run.add_argument(
+        "--partial-ok", action="store_true",
+        help="if the LLM runs out mid-scoring, keep the moments already scored",
+    )
     p_run.set_defaults(fn=cmd_run)
 
     p_resume = sub.add_parser("resume", help="resume a job from its checkpoints")
@@ -331,6 +345,10 @@ def main(argv: list[str] | None = None) -> int:
     p_resume.add_argument("--llm", choices=["gemini", "ollama"], default=None)
     p_resume.add_argument("--captions", default=None, help="caption preset name")
     p_resume.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
+    p_resume.add_argument(
+        "--partial-ok", action="store_true",
+        help="if the LLM runs out mid-scoring, keep the moments already scored",
+    )
     p_resume.set_defaults(fn=cmd_resume)
 
     p_jobs = sub.add_parser("jobs", help="list jobs")

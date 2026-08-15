@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { api } from './api'
-import type { JobResults, JobSummary, PipelineEvent, SessionState, SetupState } from './types'
+import type { JobResults, JobSummary, PartialResult, PipelineEvent, SessionState, SetupState } from './types'
 import Onboarding from './components/Onboarding'
 import Studio from './components/Studio'
 import Review from './components/Review'
@@ -20,6 +20,9 @@ export default function App() {
   const [running, setRunning] = useState(false)
   const [runError, setRunError] = useState<string | null>(null)
   const [sessions, setSessions] = useState<Record<string, SessionState>>({})
+  // Set when a stage stopped early but kept usable work, so the UI can offer
+  // "continue with what you have" instead of only a retry that will fail again.
+  const [partial, setPartial] = useState<PartialResult | null>(null)
   const unlistenRef = useRef<(() => void) | null>(null)
   const activeJobRef = useRef<string | null>(null)
   activeJobRef.current = activeJob
@@ -91,6 +94,7 @@ export default function App() {
       } else if (payload.event === 'result') {
         setRunning(false)
         refreshJobs()
+        setPartial(payload.ok ? null : payload.partial ?? null)
         if (payload.ok && activeJobRef.current) {
           api.jobResults(activeJobRef.current).then((r) => {
             setResults(r)
@@ -117,6 +121,7 @@ export default function App() {
     async (source: string, llm: string, captions: string) => {
       setRunning(true)
       setRunError(null)
+      setPartial(null)
       setStages({})
       setResults(null)
       setActiveJob(null)
@@ -181,12 +186,15 @@ export default function App() {
       onRun={startRun}
       onOpenLoop={() => setView('loop')}
       onOpenJob={openJob}
-      onResume={(id, llm) => {
+      partial={partial}
+      activeJob={activeJob}
+      onResume={(id, llm, partialOk) => {
         setRunning(true)
         setRunError(null)
+        setPartial(null)
         setStages({})
         setActiveJob(id)
-        api.resumeJob(id, llm)
+        api.resumeJob(id, llm, undefined, undefined, partialOk)
       }}
     />
   )

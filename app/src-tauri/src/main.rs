@@ -187,6 +187,7 @@ fn resume_job(
     llm: Option<String>,
     captions: Option<String>,
     camera: Option<String>,
+    partial_ok: Option<bool>,
 ) -> Result<(), String> {
     let (program, base_args) = pipeline_invocation();
     let tracked = job_id.clone();
@@ -206,6 +207,9 @@ fn resume_job(
         if let Some(cam) = camera {
             args.push("--camera".to_string());
             args.push(cam);
+        }
+        if partial_ok.unwrap_or(false) {
+            args.push("--partial-ok".to_string());
         }
         stream_pipeline(&app, &program, &args, Some(tracked));
     });

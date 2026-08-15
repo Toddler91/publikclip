@@ -13,11 +13,12 @@ from pathlib import Path
 
 import numpy as np
 
-from ..jobs.queue import Stage, StageContext, StageError
+from ..jobs.queue import PartialResultError, Stage, StageContext, StageError
 from ..music import brief as music_brief
 from . import constants as constants_mod
 from . import frames as frames_mod
 from . import llm as llm_mod
+from . import partial as partial_mod
 from . import rubric
 
 SELECT_COUNT = 12
@@ -104,9 +105,23 @@ class ScoreStage(Stage):
         cv_constants = scoring_config["constants"]
 
         candidates = cands["candidates"]
+        # Scores already paid for, from an earlier attempt that ran out of
+        # quota partway down the list.
+        partial = partial_mod.PartialScores.load_or_new(
+            ctx.job_dir / partial_mod.PARTIAL_NAME,
+            partial_mod.candidates_fingerprint(candidates),
+        )
+        allow_partial = bool(getattr(ctx.settings, "allow_partial_scoring", False))
+        if len(partial):
+            ctx.emit(-1, f"Reusing {len(partial)} moment(s) scored earlier…")
+
         scored: list[dict] = []
+        stopped_early = False
         for i, cand in enumerate(candidates):
             start, end = cand["start"], cand["end"]
+            if i in partial.entries:
+                scored.append(partial.entries[i])
+                continue
             ctx.emit(i / max(1, len(candidates)) * 0.6, f"Scoring moment {i + 1}/{len(candidates)}…")
             labeled, flat = _transcript_slice(segments, start, end)
             if len(flat.split()) < 20:
@@ -125,7 +140,27 @@ class ScoreStage(Stage):
                     # sits still for 30 s reads as a hang.
                     progress=lambda msg: ctx.emit(-1, msg),
                 )
-            except llm_mod.LlmError:
+            except llm_mod.LlmError as err:
+                # The LLM is unavailable (quota gone, key rejected, daemon
+                # down) — every remaining candidate would fail the same way, so
+                # stop asking. What was already scored is on disk and usable.
+                if allow_partial and scored:
+                    ctx.emit(
+                        -1,
+                        f"LLM unavailable after {len(scored)}/{len(candidates)} "
+                        f"moments — continuing with those.",
+                    )
+                    stopped_early = True
+                    break
+                if scored:
+                    raise PartialResultError(
+                        f"{err} Scored {len(scored)} of {len(candidates)} moments "
+                        f"before stopping — you can continue with those.",
+                        done=len(scored),
+                        total=len(candidates),
+                        stage="score",
+                        resume_flag="--partial-ok",
+                    ) from err
                 raise
             except Exception as err:  # noqa: BLE001
                 ctx.emit(-1, f"moment {i + 1} scoring failed, skipping: {err}")
@@ -142,21 +177,24 @@ class ScoreStage(Stage):
                 heatmap_pct=heatmap_pct,
                 constants=cv_constants,
             )
-            scored.append(
-                {
-                    "start": start,
-                    "end": end,
-                    "curve_score": cand["curve_score"],
-                    "channel_scores": cand["channel_scores"],
-                    "t1_raw": t1,
-                    "subscores": {k: round(v, 2) for k, v in sub.items()},
-                    "adjustments": adjustments,
-                    "arousal_pct": round(arousal_pct, 3),
-                    "heatmap_pct": round(heatmap_pct, 3) if heatmap_pct is not None else None,
-                    "summary": t1.get("summary", ""),
-                    "transcript": labeled,
-                }
-            )
+            entry = {
+                "start": start,
+                "end": end,
+                "curve_score": cand["curve_score"],
+                "channel_scores": cand["channel_scores"],
+                "t1_raw": t1,
+                "subscores": {k: round(v, 2) for k, v in sub.items()},
+                "adjustments": adjustments,
+                "arousal_pct": round(arousal_pct, 3),
+                "heatmap_pct": round(heatmap_pct, 3) if heatmap_pct is not None else None,
+                "summary": t1.get("summary", ""),
+                "transcript": labeled,
+            }
+            scored.append(entry)
+            # Banked immediately: this candidate cost an LLM call, and the
+            # next one may be the one that hits the quota wall.
+            partial.entries[i] = entry
+            partial.save()
 
         if not scored:
             raise StageError("No candidate produced a scoreable transcript.")
@@ -232,11 +270,19 @@ class ScoreStage(Stage):
         for entry in finalists:
             entry.pop("transcript", None)  # bulky; review UI re-slices from diarize
 
+        # Only drop the partial once its contents are safely in the stage
+        # checkpoint; a stage that stopped early keeps it, so a later attempt
+        # with more quota resumes from where the scoring stopped.
+        if not stopped_early:
+            partial.discard()
+
         return {
             "llm_mode": llm_mode,
             "model": client.model,
             "clips": finalists,
             "scored_count": len(scored),
+            "candidate_count": len(candidates),
+            "partial": stopped_early,
             "t2_ran": supports_vision,
             "scoring_config_version": scoring_config["version"],
             "scoring_constants": cv_constants,

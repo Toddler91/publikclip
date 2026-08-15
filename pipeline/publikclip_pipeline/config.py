@@ -87,6 +87,10 @@ class Settings:
     # laughter classes cover the bus at 320 ms resolution for a fraction of
     # the compute; flip on for the two-detector agreement boost.
     laughter_specialist: bool = False
+    # Scoring calls the LLM once per candidate; a quota that runs out partway
+    # through used to lose the whole stage. With this set, scoring keeps the
+    # candidates it already judged and moves on instead of failing.
+    allow_partial_scoring: bool = False
 
     def to_json(self) -> dict:
         return {
@@ -96,6 +100,7 @@ class Settings:
             "llm_mode": self.llm_mode,
             "caption_preset": self.caption_preset,
             "laughter_specialist": self.laughter_specialist,
+            "allow_partial_scoring": self.allow_partial_scoring,
         }
 
     @classmethod
@@ -108,4 +113,5 @@ class Settings:
             llm_mode=data.get("llm_mode", "gemini"),
             caption_preset=data.get("caption_preset", "classic"),
             laughter_specialist=data.get("laughter_specialist", False),
+            allow_partial_scoring=data.get("allow_partial_scoring", False),
         )

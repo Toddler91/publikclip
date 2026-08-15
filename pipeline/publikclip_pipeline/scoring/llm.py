@@ -26,7 +26,10 @@ from .. import config
 # The rolling alias, deliberately: Google retires pinned models for NEW api
 # keys while still advertising them in ListModels (learned live — 404 "no
 # longer available to new users" on gemini-2.5-flash with a fresh key).
-GEMINI_MODEL = "gemini-flash-latest"
+# Overridable without a rebuild: free-tier allowances differ per model, so
+# when one model's quota is gone another may still answer. The rolling alias
+# stays the default for the reason above.
+GEMINI_MODEL = os.environ.get("PUBLIKCLIP_GEMINI_MODEL") or "gemini-flash-latest"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 OLLAMA_URL = "http://localhost:11434"
 LLM_TIMEOUT = 120.0

@@ -998,3 +998,25 @@ body {
 .loop-pick img { width: 44px; height: 78px; object-fit: cover; border: 1px solid var(--line); flex: none; }
 .loop-pick-meta { display: flex; flex-direction: column; gap: 4px; font-size: 11px; min-width: 0; }
 .loop-pick-meta .mono { color: var(--amber); font-size: 12px; }
+
+/* Error panel with a recovery action: a stage that stopped early but kept
+   usable work offers to continue with it, not just a retry that will fail
+   the same way. */
+.error-block { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.error-text { flex: 1 1 320px; }
+.error-actions { display: flex; align-items: center; gap: 10px; flex: 1 1 100%; }
+.btn-continue {
+  background: none;
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  padding: 7px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-continue:hover:not(:disabled) { background: rgba(255, 178, 36, 0.12); }
+.btn-continue:disabled { opacity: 0.4; cursor: default; }
+.error-note { font-size: 12px; color: var(--dim); }

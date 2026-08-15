@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { JobSummary, SessionState } from '../types'
+import type { JobSummary, PartialResult, SessionState } from '../types'
 import KeyModal from './KeyModal'
 
 const STAGE_ORDER = [
@@ -29,11 +29,13 @@ interface Props {
   onRun: (source: string, llm: string, captions: string) => void
   onOpenLoop: () => void
   onOpenJob: (id: string) => void
-  onResume: (id: string, llm?: string) => void
+  onResume: (id: string, llm?: string, partialOk?: boolean) => void
+  partial: PartialResult | null
+  activeJob: string | null
 }
 
 export default function Studio({
-  jobs, sessions, onControlSession, running, stages, error,
+  jobs, sessions, onControlSession, running, stages, error, partial, activeJob,
   onRun, onOpenLoop, onOpenJob, onResume
 }: Props) {
   const [source, setSource] = useState('')
@@ -197,7 +199,22 @@ export default function Studio({
         {error && (
           <section className="error-block">
             <span className="led led-err" />
-            {error}
+            <span className="error-text">{error}</span>
+            {partial && (
+              <div className="error-actions">
+                <button
+                  className="btn-continue"
+                  disabled={running || !activeJob}
+                  onClick={() => activeJob && onResume(activeJob, undefined, true)}
+                  title={`Skip the rest of ${partial.stage} and continue with what finished`}
+                >
+                  CONTINUE WITH {partial.done}/{partial.total}
+                </button>
+                <span className="error-note">
+                  keeps the {partial.done} already scored and moves on to the next stage
+                </span>
+              </div>
+            )}
           </section>
         )}
       </main>
