@@ -54,6 +54,58 @@ def test_real_billing_failures_are_terminal():
         assert llm._is_terminal_429(message) is True, message
 
 
+def test_daily_cap_detected_from_quota_id():
+    """The real one. A per-DAY free-tier cap's prose is identical to a
+    per-minute limit — same wording, same "Please retry in 47s" — so only the
+    structured quotaId distinguishes them. Missing it retried a used-up daily
+    allowance five times over."""
+    payload = {
+        "error": {
+            "message": (
+                "You exceeded your current quota, please check your plan and billing "
+                "details. * Quota exceeded for metric: "
+                "generativelanguage.googleapis.com/generate_content_free_tier_requests, "
+                "limit: 20, model: gemini-3.7-flash\nPlease retry in 47.4s."
+            ),
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                    "violations": [{
+                        "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                        "quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                        "quotaValue": "20",
+                    }],
+                },
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "47s"},
+            ],
+        }
+    }
+    message = payload["error"]["message"]
+    assert llm._is_terminal_429(message) is False        # prose alone cannot tell
+    assert llm._is_terminal_429(message, payload) is True  # the quotaId can
+
+
+def test_per_minute_quota_id_stays_retryable():
+    payload = {
+        "error": {
+            "message": "free_tier requests, limit: 20",
+            "details": [{
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [{
+                    "quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
+                }],
+            }],
+        }
+    }
+    assert llm._is_terminal_429(payload["error"]["message"], payload) is False
+
+
+def test_quota_ids_tolerates_junk():
+    assert llm._quota_ids({}) == []
+    assert llm._quota_ids({"error": {"details": None}}) == []
+    assert llm._quota_ids({"error": {"details": ["nonsense", 3]}}) == []
+
+
 def test_daily_cap_is_terminal_even_on_free_tier():
     """A per-minute limit clears in seconds; a per-day cap does not, so
     retrying it inside one run is pure waiting."""

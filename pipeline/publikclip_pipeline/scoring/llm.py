@@ -23,13 +23,19 @@ import httpx
 
 from .. import config
 
-# The rolling alias, deliberately: Google retires pinned models for NEW api
-# keys while still advertising them in ListModels (learned live — 404 "no
-# longer available to new users" on gemini-2.5-flash with a fresh key).
-# Overridable without a rebuild: free-tier allowances differ per model, so
-# when one model's quota is gone another may still answer. The rolling alias
-# stays the default for the reason above.
-GEMINI_MODEL = os.environ.get("PUBLIKCLIP_GEMINI_MODEL") or "gemini-flash-latest"
+# A rolling alias, deliberately: Google retires pinned models for NEW api keys
+# while still advertising them in ListModels (confirmed again live — both
+# gemini-2.5-flash and -flash-lite now 404 with "no longer available to new
+# users" on a key made today).
+#
+# The *lite* alias, also deliberately: `gemini-flash-latest` currently resolves
+# to a model whose free tier allows 20 requests per DAY, and one video needs
+# ~59 — so a bring-your-own-key user on the free tier could never finish a
+# single run. Lite carries a far larger free allowance, which is the difference
+# between this product working and not.
+#
+# Set PUBLIKCLIP_GEMINI_MODEL to trade that quota back for sharper judgement.
+GEMINI_MODEL = os.environ.get("PUBLIKCLIP_GEMINI_MODEL") or "gemini-flash-lite-latest"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 OLLAMA_URL = "http://localhost:11434"
 LLM_TIMEOUT = 120.0
@@ -103,14 +109,33 @@ def _retry_delay_seconds(payload: dict) -> float | None:
     return float(match.group(1)) if match else None
 
 
-def _is_terminal_429(message: str) -> bool:
+def _quota_ids(payload: dict) -> list[str]:
+    """quotaId strings from the error's QuotaFailure details, if present."""
+    ids: list[str] = []
+    for detail in (payload.get("error") or {}).get("details") or []:
+        if isinstance(detail, dict) and str(detail.get("@type", "")).endswith("QuotaFailure"):
+            for violation in detail.get("violations") or []:
+                if isinstance(violation, dict) and violation.get("quotaId"):
+                    ids.append(str(violation["quotaId"]))
+    return ids
+
+
+def _is_terminal_429(message: str, payload: dict | None = None) -> bool:
     """True when waiting cannot help: no credits, or a per-day cap.
 
     Deliberately not keyed on the bare word "billing": Google's ordinary
     per-minute rate-limit message ends with "check your plan and billing
     details", so matching that word classified every routine rate limit as a
     hard stop and skipped the retry entirely.
+
+    The structured quotaId is the reliable signal for a daily cap. The prose
+    message for one reads exactly like a per-minute limit — same wording, same
+    "Please retry in 47s" — so a real daily exhaustion was retried five times
+    over as if the window were about to open.
     """
+    for quota_id in _quota_ids(payload or {}):
+        if re.search(r"per[\s_-]*day", quota_id, re.IGNORECASE):
+            return True
     low = message.lower()
     # A per-minute free-tier metric is a rate limit — unless the same message
     # also names a daily cap, which no amount of waiting will clear.
@@ -233,12 +258,23 @@ class GeminiClient:
                         detail = payload["error"]["message"]
                     except Exception:  # noqa: BLE001
                         payload, detail = {}, "rate limited"
-                    if _is_terminal_429(detail):
+                    if _is_terminal_429(detail, payload):
                         # Retrying cannot clear this; say so instead of
                         # burning the budget and reporting a generic failure.
-                        raise LlmError(
-                            f"Gemini is out of quota and waiting will not help: {detail.strip()} "
+                        daily = any(
+                            re.search(r"per[\s_-]*day", q, re.IGNORECASE)
+                            for q in _quota_ids(payload)
+                        )
+                        hint = (
+                            "This model's free daily allowance is used up — it resets at "
+                            "midnight Pacific. Try a model with a larger free quota "
+                            "(PUBLIKCLIP_GEMINI_MODEL), top up billing, or switch to Ollama."
+                            if daily else
                             "Top up billing, or switch this job to Ollama in Settings."
+                        )
+                        raise LlmError(
+                            f"Gemini is out of quota and waiting will not help: "
+                            f"{detail.strip()} {hint}"
                         )
                     last_err = LlmError(f"Gemini 429: {detail}")
                     if attempt == RETRY_ATTEMPTS - 1:
