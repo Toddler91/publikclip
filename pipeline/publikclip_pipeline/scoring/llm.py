@@ -14,8 +14,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -32,6 +34,55 @@ LLM_TIMEOUT = 120.0
 
 class LlmError(Exception):
     """User-actionable LLM failure (bad key, daemon down, model missing)."""
+
+
+# Free-tier Gemini allows a small number of requests per minute, and scoring
+# makes one call per candidate — 35+ on an hour-long stream. Unpaced they go
+# out as fast as the network allows and the stage dies on the first 429.
+# Pacing is cheaper than retrying and keeps a run inside the quota instead of
+# repeatedly bouncing off it.
+GEMINI_FREE_TIER_RPM = 20
+MIN_CALL_INTERVAL = 60.0 / GEMINI_FREE_TIER_RPM
+# Retries wait as long as the API asks: it reports its own backoff, routinely
+# longer than a guess. The old fixed 4 s/8 s schedule gave up while the server
+# was still asking for ~16 s.
+MAX_RETRY_WAIT = 90.0
+RETRY_ATTEMPTS = 5
+
+_BILLING_PHRASES = (
+    "billing account",
+    "billing is not enabled",
+    "billing has not been enabled",
+    "credits have been exhausted",
+    "credit balance",
+    "insufficient credit",
+)
+
+
+def _retry_delay_seconds(payload: dict) -> float | None:
+    """The server's requested backoff, from RetryInfo or the message text."""
+    error = payload.get("error") or {}
+    for detail in error.get("details") or []:
+        if isinstance(detail, dict) and str(detail.get("@type", "")).endswith("RetryInfo"):
+            match = re.match(r"([\d.]+)s?$", str(detail.get("retryDelay", "")).strip())
+            if match:
+                return float(match.group(1))
+    match = re.search(r"retry in ([\d.]+)\s*s", str(error.get("message", "")), re.IGNORECASE)
+    return float(match.group(1)) if match else None
+
+
+def _is_billing_stop(message: str) -> bool:
+    """True only for 'the account has actually run out of money'.
+
+    Deliberately not keyed on the bare word "billing": Google's ordinary
+    free-tier rate-limit message ends with "check your plan and billing
+    details", so matching that word classified every routine rate limit as a
+    hard stop and skipped the retry entirely.
+    """
+    low = message.lower()
+    if "free_tier" in low or "free tier" in low:
+        return False  # a free-tier quota metric is a rate limit, not a bill
+    return any(phrase in low for phrase in _BILLING_PHRASES)
 
 
 def gemini_api_key() -> str | None:
@@ -76,7 +127,7 @@ def _strip_fences(text: str) -> str:
 class GeminiClient:
     backend = "gemini"
 
-    def __init__(self, model: str = GEMINI_MODEL):
+    def __init__(self, model: str = GEMINI_MODEL, rpm: int = GEMINI_FREE_TIER_RPM):
         self.model = model
         key = gemini_api_key()
         if not key:
@@ -85,9 +136,24 @@ class GeminiClient:
                 "PUBLIKCLIP_GEMINI_API_KEY), or switch to Ollama mode."
             )
         self._key = key
+        self._min_interval = 60.0 / rpm if rpm > 0 else 0.0
+        self._last_call = 0.0
+
+    def _wait_for_slot(self) -> None:
+        """Space calls out so a scoring pass stays inside the free-tier rate."""
+        if self._min_interval <= 0:
+            return
+        gap = time.monotonic() - self._last_call
+        if gap < self._min_interval:
+            time.sleep(self._min_interval - gap)
+        self._last_call = time.monotonic()
 
     def generate_json(
-        self, prompt: str, schema: dict, images: list[bytes] | None = None
+        self,
+        prompt: str,
+        schema: dict,
+        images: list[bytes] | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> dict:
         images = images or []
         cache_file = _cache_dir() / f"{_cache_key(self.backend, self.model, prompt, schema, images)}.json"
@@ -110,8 +176,9 @@ class GeminiClient:
             },
         }
         last_err: Exception | None = None
-        for attempt in range(3):
+        for attempt in range(RETRY_ATTEMPTS):
             try:
+                self._wait_for_slot()
                 res = httpx.post(
                     GEMINI_URL.format(model=self.model),
                     params={"key": self._key},
@@ -121,19 +188,27 @@ class GeminiClient:
                 if res.status_code in (401, 403):
                     raise LlmError("Gemini rejected the API key. Check it in Settings.")
                 if res.status_code == 429:
-                    import time
-
                     # Surface the API's own words — a quota backoff and a
                     # "credits depleted" billing stop look identical as bare
                     # 429s but need opposite user actions.
                     try:
-                        detail = res.json()["error"]["message"]
+                        payload = res.json()
+                        detail = payload["error"]["message"]
                     except Exception:  # noqa: BLE001
-                        detail = "rate limited"
+                        payload, detail = {}, "rate limited"
                     last_err = LlmError(f"Gemini 429: {detail}")
-                    if "credit" in detail.lower() or "billing" in detail.lower():
+                    if _is_billing_stop(detail):
                         raise last_err
-                    time.sleep(4 * (attempt + 1))
+                    if attempt == RETRY_ATTEMPTS - 1:
+                        break
+                    # Honour the server's own backoff; fall back to widening
+                    # waits, and add a margin so we return *after* the window
+                    # rather than one moment before it opens.
+                    asked = _retry_delay_seconds(payload)
+                    wait = min(asked + 1.0 if asked else 5.0 * (attempt + 1), MAX_RETRY_WAIT)
+                    if progress:
+                        progress(f"Gemini rate limit — waiting {wait:.0f}s…")
+                    time.sleep(wait)
                     continue
                 res.raise_for_status()
                 payload = res.json()
@@ -165,7 +240,11 @@ class OllamaClient:
         self.model = model if model in models else _pick_ollama_model(models)
 
     def generate_json(
-        self, prompt: str, schema: dict, images: list[bytes] | None = None
+        self,
+        prompt: str,
+        schema: dict,
+        images: list[bytes] | None = None,
+        progress: Callable[[str], None] | None = None,  # local: never rate limited
     ) -> dict:
         if images:
             # Text-only fallback: the caller records visual as signals_missing.

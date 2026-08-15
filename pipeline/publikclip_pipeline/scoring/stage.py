@@ -118,7 +118,13 @@ class ScoreStage(Stage):
                 "events_desc": _events_desc(window_events),
             }
             try:
-                t1 = client.generate_json(rubric.t1_prompt(labeled, context), rubric.T1_SCHEMA)
+                t1 = client.generate_json(
+                    rubric.t1_prompt(labeled, context),
+                    rubric.T1_SCHEMA,
+                    # A rate-limit wait is silent otherwise, and a stage that
+                    # sits still for 30 s reads as a hang.
+                    progress=lambda msg: ctx.emit(-1, msg),
+                )
             except llm_mod.LlmError:
                 raise
             except Exception as err:  # noqa: BLE001
