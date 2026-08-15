@@ -49,14 +49,43 @@ MIN_CALL_INTERVAL = 60.0 / GEMINI_FREE_TIER_RPM
 MAX_RETRY_WAIT = 90.0
 RETRY_ATTEMPTS = 5
 
-_BILLING_PHRASES = (
-    "billing account",
-    "billing is not enabled",
-    "billing has not been enabled",
-    "credits have been exhausted",
-    "credit balance",
-    "insufficient credit",
+# A 429 that waiting cannot clear. Matched on meaning rather than exact
+# sentences: an earlier literal list missed "Your prepayment credits are
+# depleted", so a dead account burned every retry and then reported the
+# useless "failed after retries" wrapper instead of the actual reason.
+_TERMINAL_429_PATTERNS = (
+    r"prepay",                                              # prepaid balance gone
+    r"credits?\b.*\b(deplet|exhaust|empty|too low)",
+    r"(deplet|exhaust)\w*\b.*\bcredits?",
+    r"(ran|run|running)\s+out\s+of\s+credits?",
+    r"insufficient\s+(credit|fund|balance|quota)",
+    r"credit balance",
+    r"billing account",
+    r"billing\s+(is|has)?\s*not\s+(been\s+)?enabled",
+    r"enable billing",
+    r"per[\s_-]*day|daily\s+limit",                         # a day is not a retry
 )
+
+
+def _sleep_with_countdown(
+    seconds: float, progress: Callable[[str], None] | None, label: str = "Gemini rate limit"
+) -> None:
+    """Sleep, ticking the remaining time out through progress once a second.
+
+    A silent 30 s wait is indistinguishable from a hang — that is how the first
+    rate-limit failure got reported as "stuck". Counting down says the run is
+    alive and how long the wait has left to go.
+    """
+    if progress is None:
+        time.sleep(seconds)
+        return
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        progress(f"{label} — retrying in {int(remaining) + 1}s…")
+        time.sleep(min(1.0, remaining))
 
 
 def _retry_delay_seconds(payload: dict) -> float | None:
@@ -71,18 +100,23 @@ def _retry_delay_seconds(payload: dict) -> float | None:
     return float(match.group(1)) if match else None
 
 
-def _is_billing_stop(message: str) -> bool:
-    """True only for 'the account has actually run out of money'.
+def _is_terminal_429(message: str) -> bool:
+    """True when waiting cannot help: no credits, or a per-day cap.
 
     Deliberately not keyed on the bare word "billing": Google's ordinary
-    free-tier rate-limit message ends with "check your plan and billing
+    per-minute rate-limit message ends with "check your plan and billing
     details", so matching that word classified every routine rate limit as a
     hard stop and skipped the retry entirely.
     """
     low = message.lower()
-    if "free_tier" in low or "free tier" in low:
-        return False  # a free-tier quota metric is a rate limit, not a bill
-    return any(phrase in low for phrase in _BILLING_PHRASES)
+    # A per-minute free-tier metric is a rate limit — unless the same message
+    # also names a daily cap, which no amount of waiting will clear.
+    per_minute_free_tier = ("free_tier" in low or "free tier" in low) and not re.search(
+        r"per[\s_-]*day|daily", low
+    )
+    if per_minute_free_tier:
+        return False
+    return any(re.search(pattern, low) for pattern in _TERMINAL_429_PATTERNS)
 
 
 def gemini_api_key() -> str | None:
@@ -196,9 +230,14 @@ class GeminiClient:
                         detail = payload["error"]["message"]
                     except Exception:  # noqa: BLE001
                         payload, detail = {}, "rate limited"
+                    if _is_terminal_429(detail):
+                        # Retrying cannot clear this; say so instead of
+                        # burning the budget and reporting a generic failure.
+                        raise LlmError(
+                            f"Gemini is out of quota and waiting will not help: {detail.strip()} "
+                            "Top up billing, or switch this job to Ollama in Settings."
+                        )
                     last_err = LlmError(f"Gemini 429: {detail}")
-                    if _is_billing_stop(detail):
-                        raise last_err
                     if attempt == RETRY_ATTEMPTS - 1:
                         break
                     # Honour the server's own backoff; fall back to widening
@@ -206,9 +245,7 @@ class GeminiClient:
                     # rather than one moment before it opens.
                     asked = _retry_delay_seconds(payload)
                     wait = min(asked + 1.0 if asked else 5.0 * (attempt + 1), MAX_RETRY_WAIT)
-                    if progress:
-                        progress(f"Gemini rate limit — waiting {wait:.0f}s…")
-                    time.sleep(wait)
+                    _sleep_with_countdown(wait, progress)
                     continue
                 res.raise_for_status()
                 payload = res.json()
@@ -220,7 +257,11 @@ class GeminiClient:
                 raise
             except (httpx.HTTPError, KeyError, json.JSONDecodeError, IndexError) as err:
                 last_err = err
-        raise LlmError(f"Gemini call failed after retries: {last_err}")
+        detail = str(last_err).replace("Gemini 429: ", "").strip()
+        raise LlmError(
+            f"Gemini still rate limited after {RETRY_ATTEMPTS} attempts: {detail} "
+            "Wait for the quota window, or switch this job to Ollama in Settings."
+        )
 
 
 class OllamaClient:

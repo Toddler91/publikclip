@@ -22,24 +22,45 @@ FREE_TIER_429 = (
 )
 
 
-def test_free_tier_limit_is_not_a_billing_stop():
-    assert llm._is_billing_stop(FREE_TIER_429) is False
+def test_free_tier_limit_is_not_terminal():
+    assert llm._is_terminal_429(FREE_TIER_429) is False
 
 
-def test_plain_quota_message_mentioning_billing_is_not_a_stop():
-    assert llm._is_billing_stop(
+def test_plain_quota_message_mentioning_billing_is_not_terminal():
+    assert llm._is_terminal_429(
         "You exceeded your current quota, please check your plan and billing details."
     ) is False
 
 
-def test_real_billing_failures_are_stops():
+def test_depleted_prepay_credits_are_terminal():
+    """The message that burned five retries and reported nothing useful."""
+    assert llm._is_terminal_429(
+        "Your prepayment credits are depleted. Please go to AI Studio at "
+        "https://ai.studio/projects to manage your project and billing. Learn "
+        "more at https://ai.google.dev/gemini-api/docs/billing#prepay."
+    ) is True
+
+
+def test_real_billing_failures_are_terminal():
     for message in (
         "Billing account not found for this project.",
         "Billing is not enabled for this project.",
         "Your credits have been exhausted.",
         "Insufficient credit balance to complete this request.",
+        "Your credit balance is too low.",
+        "You have run out of credits.",
+        "Please enable billing to continue.",
     ):
-        assert llm._is_billing_stop(message) is True, message
+        assert llm._is_terminal_429(message) is True, message
+
+
+def test_daily_cap_is_terminal_even_on_free_tier():
+    """A per-minute limit clears in seconds; a per-day cap does not, so
+    retrying it inside one run is pure waiting."""
+    assert llm._is_terminal_429(
+        "Quota exceeded for metric: generate_content_free_tier_requests_per_day, "
+        "limit: 50"
+    ) is True
 
 
 def test_retry_delay_from_retry_info():
@@ -82,6 +103,26 @@ def test_pacing_spaces_calls(monkeypatch):
         client._wait_for_slot()
     elapsed = time.monotonic() - start
     assert elapsed >= 1.0  # first is free, then two gaps of 0.5 s
+
+
+def test_countdown_ticks_down_once_a_second():
+    """A silent wait reads as a hang; the countdown proves the run is alive."""
+    seen = []
+    start = time.monotonic()
+    llm._sleep_with_countdown(2.5, seen.append)
+    elapsed = time.monotonic() - start
+
+    assert 2.4 <= elapsed < 4.0
+    assert len(seen) >= 2
+    numbers = [int(m.split("retrying in ")[1].split("s")[0]) for m in seen]
+    assert numbers == sorted(numbers, reverse=True)  # counts down, never up
+    assert numbers[0] <= 3 and numbers[-1] == 1
+
+
+def test_countdown_without_progress_still_sleeps():
+    start = time.monotonic()
+    llm._sleep_with_countdown(0.3, None)
+    assert time.monotonic() - start >= 0.29
 
 
 def test_pacing_disabled_when_rpm_zero(monkeypatch):
