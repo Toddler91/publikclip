@@ -194,24 +194,39 @@ def _esc(text: str) -> str:
     return text.replace("{", "(").replace("}", ")").replace("\\", "/")
 
 
-def _header(preset: Preset) -> str:
+def _header(preset: Preset, play_res: tuple[int, int] | None = None) -> str:
+    """Style block for a canvas of `play_res`, default the 9:16 clip target.
+
+    Every size in a Preset — font, outline, shadow, margin — is absolute in
+    PlayRes units, authored against 1080x1920. Rendering onto a differently
+    shaped canvas without rescaling them puts the text at the wrong size and
+    the wrong height, so they scale with the frame. At the default the factor
+    is exactly 1 and the output is byte-identical to before.
+    """
+    res_x, res_y = play_res or (PLAY_RES_X, PLAY_RES_Y)
+    k = res_y / PLAY_RES_Y
+    size = max(8, int(preset.size * k))
+    outline = max(1, int(preset.outline * k))
+    shadow = int(preset.shadow * k)
+    margin_v = int(preset.margin_v * k)
+    margin_h = int(60 * k)
     bold = -1 if preset.bold else 0
     return (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
-        f"PlayResX: {PLAY_RES_X}\nPlayResY: {PLAY_RES_Y}\n"
+        f"PlayResX: {res_x}\nPlayResY: {res_y}\n"
         "ScaledBorderAndShadow: yes\nWrapStyle: 2\n\n"
         "[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Cap,{preset.font},{preset.size},{preset.primary},{preset.primary},"
+        f"Style: Cap,{preset.font},{size},{preset.primary},{preset.primary},"
         f"{preset.outline_color},&H96000000,{bold},0,0,0,100,100,0,0,1,"
-        f"{preset.outline},{preset.shadow},2,60,60,{preset.margin_v},1\n"
-        f"Style: Tag,{preset.font},{int(preset.size * 0.55)},{preset.event_tag_color},"
+        f"{outline},{shadow},2,{margin_h},{margin_h},{margin_v},1\n"
+        f"Style: Tag,{preset.font},{int(size * 0.55)},{preset.event_tag_color},"
         f"{preset.event_tag_color},{preset.outline_color},&H96000000,0,-1,0,0,100,100,0,0,1,"
-        f"{max(2, preset.outline - 2)},0,2,60,60,{preset.margin_v + int(preset.size * 1.5)},1\n\n"
+        f"{max(2, outline - 2)},0,2,{margin_h},{margin_h},{margin_v + int(size * 1.5)},1\n\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Text\n"
     )
@@ -238,11 +253,16 @@ def build_ass(
     events: list[dict],
     preset_name: str = "classic",
     emoji_ok: bool = False,
+    play_res: tuple[int, int] | None = None,
 ) -> str:
     """The full ASS document for one clip. `events` carry clip-relative
-    start/end + type; only bus-detected non-speech events become tags."""
+    start/end + type; only bus-detected non-speech events become tags.
+
+    `play_res` overrides the 9:16 clip canvas for captioning a source at its
+    own dimensions rather than a reframed crop.
+    """
     preset = PRESETS.get(preset_name, PRESETS["classic"])
-    lines = [_header(preset)]
+    lines = [_header(preset, play_res)]
 
     for chunk in chunk_words(words):
         for i, word in enumerate(chunk.words):

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from . import config
 from .jobs import queue, runlock, supervise
@@ -76,6 +77,38 @@ def cmd_run(args: argparse.Namespace) -> int:
     settings.allow_partial_scoring = bool(getattr(args, "partial_ok", False))
     job = queue.create_job(source_type, source, json.dumps(settings.to_json()))
     return _execute(job, args.jsonl)
+
+
+def cmd_caption(args: argparse.Namespace) -> int:
+    """Captions only — the source back whole, with captions burned in."""
+    from .captions import ass as ass_mod
+    from .captions import tool as caption_tool
+
+    if args.list_presets:
+        for name in sorted(ass_mod.PRESETS):
+            print(name)
+        return 0
+    if not args.source:
+        print("caption: a source file is required", file=sys.stderr)
+        return 2
+
+    try:
+        summary = caption_tool.caption_video(
+            Path(args.source),
+            out_path=Path(args.output) if args.output else None,
+            preset=args.preset,
+            tags=args.tags,
+            ass_only=args.ass_only,
+            progress=_progress_printer(args.jsonl),
+        )
+    except caption_tool.CaptionError as exc:
+        if args.jsonl:
+            print(json.dumps({"event": "error", "message": str(exc)}), flush=True)
+        else:
+            print(f"caption: {exc}", file=sys.stderr)
+        return 1
+    _emit_result(args.jsonl, summary)
+    return 0
 
 
 def cmd_resume(args: argparse.Namespace) -> int:
@@ -350,6 +383,22 @@ def main(argv: list[str] | None = None) -> int:
         help="if the LLM runs out mid-scoring, keep the moments already scored",
     )
     p_resume.set_defaults(fn=cmd_resume)
+
+    p_cap = sub.add_parser(
+        "caption",
+        help="captions only — the whole video back, with captions burned in",
+    )
+    p_cap.add_argument("source", nargs="?", help="video file to caption")
+    p_cap.add_argument("-o", "--output", help="output path (default: the source with .captioned.mp4)")
+    p_cap.add_argument("--preset", default="classic", help="caption style (see --list-presets)")
+    p_cap.add_argument("--list-presets", action="store_true", help="print the available styles and exit")
+    p_cap.add_argument(
+        "--tags", action="store_true",
+        help="also detect laughter/gasps for [laughs] tags (adds an audio-event pass)",
+    )
+    p_cap.add_argument("--ass-only", action="store_true", help="write the .ass subtitle file, do not burn it in")
+    p_cap.add_argument("--jsonl", action="store_true", help="machine-readable progress on stdout")
+    p_cap.set_defaults(fn=cmd_caption)
 
     p_jobs = sub.add_parser("jobs", help="list jobs")
     p_jobs.set_defaults(fn=cmd_jobs)
