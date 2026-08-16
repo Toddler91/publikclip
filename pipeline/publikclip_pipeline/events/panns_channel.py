@@ -62,18 +62,36 @@ THRESHOLDS: dict[str, tuple[float, float]] = {
     "shout": (0.15, 0.08),
     "applause": (0.15, 0.08),
     "cheer": (0.15, 0.08),
-    # PROVISIONAL — unlike the figures above, these are not measured. The
-    # conversational numbers come from a real 2 h podcast; no equivalent pass
-    # has been run over game audio. Started at the scream/shout level: game
-    # gunfire is loud and spectrally distinctive, so the likelier error is
-    # these being too low (firing on ambience) than too high. The gameplay
-    # channel scores against a rolling baseline, which tolerates a chatty
-    # detector far better than a silent one, so erring low is the safer side.
-    # Calibrate against a real VOD before trusting the absolute numbers.
+    # Measured over a 77.6 min solo FPS capture (1080x1920 60 fps, one
+    # speaker). Gunfire separates cleanly from everything else in the mix:
+    # peak 0.574, p99.9 0.455, p99 0.262, p95 0.076 — an order of magnitude
+    # above the conversational classes on the same audio, none of which
+    # reached even their own enter threshold (laughter topped 0.091, shout
+    # 0.004). 0.15 sits between p95 and p99 and yields ~1.3 events/min, dense
+    # enough for the gameplay channel's rolling baseline to mean something.
     "gunfire": (0.15, 0.08),
+    # Explosion never fired on that capture: peak 0.075, below its own enter
+    # threshold everywhere. Either the game has none, or PANNs hears them as
+    # gunfire — the two are adjacent in the AudioSet ontology. Kept mapped
+    # because it costs nothing (same forward pass) and a different game may
+    # well separate them; treat it as unproven rather than calibrated.
     "explosion": (0.15, 0.08),
 }
 CONF_SCALE = 0.30
+
+# Per-type overrides for that normalization. One scale for every class assumed
+# they share a dynamic range, which conversational classes roughly do. Gunfire
+# does not: it peaks at 0.574 on real game audio, so against 0.30 a third of
+# its detections clip to exactly 1.0 and a distant shot reads the same as a
+# point-blank burst. The gameplay channel is a density of *weighted* events, so
+# that flattening lands squarely on the signal it needs. Scaled to its measured
+# p99.99 instead, which keeps the top of the range at ~1.0 without clipping the
+# body of the distribution into it.
+CONF_SCALES: dict[str, float] = {"gunfire": 0.55}
+
+
+def conf_scale(etype: str) -> float:
+    return CONF_SCALES.get(etype, CONF_SCALE)
 
 
 def load_class_indices() -> dict[int, str]:

@@ -7,6 +7,7 @@ the whole VOD equally interesting, which is the same as marking none of it.
 import numpy as np
 
 from publikclip_pipeline.candidates import curve
+from publikclip_pipeline.events import panns_channel
 
 
 def _fire(start: float, end: float, conf: float = 1.0) -> dict:
@@ -75,6 +76,35 @@ def test_weights_target_solo_gameplay():
     # Vocal energy carries the most weight of any live channel.
     live = {k: v for k, v in curve.WEIGHTS.items() if v > 0}
     assert max(live, key=live.get) == "dynamics"
+
+
+def test_gunfire_confidence_does_not_clip_across_its_range():
+    """Measured gunfire peaks reach 0.574. On the shared 0.30 scale every peak
+    from 0.30 up reads exactly 1.0, so a distant shot and a point-blank burst
+    weigh the same — and the gameplay channel is a density of weighted events,
+    so that flattening lands on the signal itself."""
+    assert min(1.0, 0.30 / panns_channel.CONF_SCALE) == 1.0  # the old behaviour
+    scale = panns_channel.conf_scale("gunfire")
+    assert min(1.0, 0.30 / scale) < min(1.0, 0.50 / scale) < 1.0
+
+
+def test_conversational_types_keep_the_shared_scale():
+    for etype in ("laugh", "gasp", "applause"):
+        assert panns_channel.conf_scale(etype) == panns_channel.CONF_SCALE
+
+
+def test_every_mapped_class_has_an_explicit_threshold():
+    """A CLASS_MAP entry with no THRESHOLDS row silently takes a default at the
+    call site, which is how a new class ships mis-tuned without anyone noticing."""
+    for etype in set(panns_channel.CLASS_MAP.values()):
+        assert etype in panns_channel.THRESHOLDS, etype
+
+
+def test_gunfire_classes_reach_the_gameplay_channel():
+    """The bus types PANNs emits must be the ones the channel weighs."""
+    mapped = set(panns_channel.CLASS_MAP.values())
+    for etype in curve.GAMEPLAY_EVENT_WEIGHTS:
+        assert etype in mapped, etype
 
 
 def test_every_weighted_channel_is_one_the_stage_builds():

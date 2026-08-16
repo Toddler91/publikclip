@@ -123,7 +123,9 @@ class EventsStage(Stage):
                         "type": etype,
                         "start": round(start, 3),
                         "end": round(end, 3),
-                        "confidence": round(min(1.0, float(peak) / panns_channel.CONF_SCALE), 3),
+                        "confidence": round(
+                            min(1.0, float(peak) / panns_channel.conf_scale(etype)), 3
+                        ),
                         "sources": ["panns"],
                     }
                 )
