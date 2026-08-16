@@ -103,7 +103,7 @@ def render_clip(
     out_path: Path,
     clip_start: float,
     clip_end: float,
-    trajectory: dict,
+    trajectory: dict | None,
     ass_path: Path | None,
     fonts_dir: Path | None,
     lufs: float = -14.0,
@@ -113,21 +113,29 @@ def render_clip(
     timeout: float = 1800.0,
 ) -> None:
     duration = clip_end - clip_start
-    boxes = crop_boxes(trajectory["frames"], src_w, src_h)
-    if not boxes:
-        boxes = [(src_h * 9 // 16 // 2 * 2, src_h - src_h % 2, 0, 0)]
-    fps = float(trajectory.get("fps", 25))
 
-    cmd_path = out_path.with_suffix(".cmd")
-    cmd_path.write_text("\n".join(sendcmd_lines(boxes, fps)) + "\n")
+    if trajectory is None:
+        # Reframing off: no crop, no sendcmd, no per-frame trajectory. The
+        # scale stays because a vertical source is not necessarily exactly
+        # OUT_W x OUT_H — on one that already is, it is a no-op.
+        cmd_path = None
+        vf_parts = [f"scale={OUT_W}:{OUT_H}:flags=lanczos", "setsar=1"]
+    else:
+        boxes = crop_boxes(trajectory["frames"], src_w, src_h)
+        if not boxes:
+            boxes = [(src_h * 9 // 16 // 2 * 2, src_h - src_h % 2, 0, 0)]
+        fps = float(trajectory.get("fps", 25))
 
-    w0, h0, x0, y0 = boxes[0]
-    vf_parts = [
-        f"sendcmd=f={_q(cmd_path)}",
-        f"crop@c=w={w0}:h={h0}:x={x0}:y={y0}",
-        f"scale={OUT_W}:{OUT_H}:flags=lanczos",
-        "setsar=1",
-    ]
+        cmd_path = out_path.with_suffix(".cmd")
+        cmd_path.write_text("\n".join(sendcmd_lines(boxes, fps)) + "\n")
+
+        w0, h0, x0, y0 = boxes[0]
+        vf_parts = [
+            f"sendcmd=f={_q(cmd_path)}",
+            f"crop@c=w={w0}:h={h0}:x={x0}:y={y0}",
+            f"scale={OUT_W}:{OUT_H}:flags=lanczos",
+            "setsar=1",
+        ]
     if ass_path is not None:
         sub = f"subtitles=filename={_q(ass_path)}"
         if fonts_dir is not None:
@@ -153,7 +161,8 @@ def render_clip(
         str(out_path),
     ]
     proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-    cmd_path.unlink(missing_ok=True)
+    if cmd_path is not None:
+        cmd_path.unlink(missing_ok=True)
     if proc.returncode != 0:
         raise RuntimeError(f"Render failed: {(proc.stderr or '')[-800:]}")
 

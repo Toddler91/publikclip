@@ -57,10 +57,16 @@ class RenderStage(Stage):
         outputs = []
         clips = score["clips"]
         for i, clip in enumerate(clips):
-            traj_path = camera["trajectories"].get(str(i))
-            if not traj_path or not Path(traj_path).exists():
-                continue
-            trajectory = json.loads(Path(traj_path).read_text())
+            if not ctx.settings.reframe:
+                # No trajectory exists by design. Without this the check below
+                # would skip every clip and the stage would report success
+                # having rendered nothing.
+                trajectory = None
+            else:
+                traj_path = camera["trajectories"].get(str(i))
+                if not traj_path or not Path(traj_path).exists():
+                    continue
+                trajectory = json.loads(Path(traj_path).read_text())
             start, end = clip["start"], clip["end"]
             ctx.emit(i / max(1, len(clips)), f"Rendering clip {i + 1}/{len(clips)}…")
 

@@ -93,7 +93,9 @@ def _camera_needs_redirect(job_dir: Path, clip_idx: int, edit: ClipEdit, score_c
     return False
 
 
-def _trajectory_for(job_dir: Path, clip_idx: int, edit: ClipEdit, score_clip: dict, settings: config.Settings, emit) -> dict:
+def _trajectory_for(job_dir: Path, clip_idx: int, edit: ClipEdit, score_clip: dict, settings: config.Settings, emit) -> dict | None:
+    if not settings.reframe:
+        return None  # nothing to direct; the frame is rendered as shot
     if not _camera_needs_redirect(job_dir, clip_idx, edit, score_clip):
         traj_path = _load_stage(job_dir, "camera")["trajectories"][str(clip_idx)]
         return json.loads(Path(traj_path).read_text())
@@ -189,15 +191,17 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
 
     # --- camera -------------------------------------------------------------
     trajectory = _trajectory_for(job_dir, clip_idx, edit, clip, settings, emit)
-    fps = float(trajectory.get("fps", 25))
-    # Trajectory frames start at edit.start whether reused (bounds unchanged
-    # → edit.start == run start) or freshly re-directed for new bounds.
-    frames = remap.remap_trajectory(trajectory["frames"], fps, edit.start)
-
     src_w, src_h = int(ingest["probe"]["width"]), int(ingest["probe"]["height"])
-    boxes = renderer.crop_boxes(frames, src_w, src_h)
-    if not boxes:
-        boxes = [(src_h * 9 // 16 // 2 * 2, src_h - src_h % 2, 0, 0)]
+    if trajectory is None:
+        fps, boxes = 25.0, None
+    else:
+        fps = float(trajectory.get("fps", 25))
+        # Trajectory frames start at edit.start whether reused (bounds unchanged
+        # → edit.start == run start) or freshly re-directed for new bounds.
+        frames = remap.remap_trajectory(trajectory["frames"], fps, edit.start)
+        boxes = renderer.crop_boxes(frames, src_w, src_h)
+        if not boxes:
+            boxes = [(src_h * 9 // 16 // 2 * 2, src_h - src_h % 2, 0, 0)]
 
     # --- captions (remapped) ------------------------------------------------
     words_src = [
@@ -260,13 +264,19 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
     concat_in = "".join(f"[v{i}][a{i}]" for i in range(n))
     graph = trims + [f"{concat_in}concat=n={n}:v=1:a=1[vc][ac]"]
 
-    cmd_path = out_dir / f"clip_{clip_idx:02d}.cmd"
-    cmd_path.write_text("\n".join(renderer.sendcmd_lines(boxes, fps)) + "\n")
-    vchain = (
-        f"[vc]sendcmd=f={renderer._q(cmd_path)},"  # noqa: SLF001
-        f"crop@c=w={boxes[0][0]}:h={boxes[0][1]}:x={boxes[0][2]}:y={boxes[0][3]},"
-        f"scale={renderer.OUT_W}:{renderer.OUT_H}:flags=lanczos,setsar=1[vb]"
-    )
+    cmd_path = None
+    if boxes is None:  # reframing off — scale only, no crop and no sendcmd
+        vchain = (
+            f"[vc]scale={renderer.OUT_W}:{renderer.OUT_H}:flags=lanczos,setsar=1[vb]"
+        )
+    else:
+        cmd_path = out_dir / f"clip_{clip_idx:02d}.cmd"
+        cmd_path.write_text("\n".join(renderer.sendcmd_lines(boxes, fps)) + "\n")
+        vchain = (
+            f"[vc]sendcmd=f={renderer._q(cmd_path)},"  # noqa: SLF001
+            f"crop@c=w={boxes[0][0]}:h={boxes[0][1]}:x={boxes[0][2]}:y={boxes[0][3]},"
+            f"scale={renderer.OUT_W}:{renderer.OUT_H}:flags=lanczos,setsar=1[vb]"
+        )
     graph.append(vchain)
 
     ov_inputs, ov_chains, vlabel = _overlay_filters(edit.overlays, 1, renderer.OUT_W, renderer.OUT_H)
@@ -297,7 +307,8 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
         str(out_path),
     ]
     proc = subprocess.run(args, capture_output=True, text=True, timeout=1800)
-    cmd_path.unlink(missing_ok=True)
+    if cmd_path is not None:
+        cmd_path.unlink(missing_ok=True)
     if proc.returncode != 0:
         raise RuntimeError(f"Clip render failed: {(proc.stderr or '')[-800:]}")
 

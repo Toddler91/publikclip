@@ -16,11 +16,27 @@ class CameraStage(Stage):
     schema_version = 1
 
     def artifacts_ok(self, ctx: StageContext, data: dict) -> bool:
+        if data.get("reframe", True) != ctx.settings.reframe:
+            return False  # toggled → the cached pass answers a different question
+        if not ctx.settings.reframe:
+            return True  # nothing was written and nothing needs to be
         if data.get("camera_settings") != ctx.settings.camera.__dict__:
             return False  # camera style changed → re-direct
         return all(Path(p).exists() for p in data.get("trajectories", {}).values())
 
     def run(self, ctx: StageContext) -> dict:
+        # Checked before the prior-stage requirements below: with reframing off
+        # this stage needs none of them, and the vision models it would load
+        # are the most expensive download and the slowest pass in the job.
+        if not ctx.settings.reframe:
+            ctx.emit(1.0, "Reframing off — rendering the source frame as shot")
+            return {
+                "trajectories": {},
+                "stats": [],
+                "camera_settings": ctx.settings.camera.__dict__.copy(),
+                "reframe": False,
+            }
+
         import numpy as np
 
         from . import asd as asd_mod
@@ -93,4 +109,5 @@ class CameraStage(Stage):
             "trajectories": trajectories,
             "stats": stats,
             "camera_settings": ctx.settings.camera.__dict__.copy(),
+            "reframe": True,
         }

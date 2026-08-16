@@ -91,6 +91,12 @@ class Settings:
     # through used to lose the whole stage. With this set, scoring keeps the
     # candidates it already judged and moves on instead of failing.
     allow_partial_scoring: bool = False
+    # The camera director crops a 9:16 window out of a wider source and tracks
+    # the speaker inside it. A source already shot vertical needs none of that:
+    # the crop's best case is the whole frame unchanged, and its cost is face
+    # detection plus active-speaker analysis on every finalist clip. Off skips
+    # the vision models entirely and renders the frame as shot.
+    reframe: bool = True
 
     def to_json(self) -> dict:
         return {
@@ -101,6 +107,7 @@ class Settings:
             "caption_preset": self.caption_preset,
             "laughter_specialist": self.laughter_specialist,
             "allow_partial_scoring": self.allow_partial_scoring,
+            "reframe": self.reframe,
         }
 
     @classmethod
@@ -114,4 +121,5 @@ class Settings:
             caption_preset=data.get("caption_preset", "classic"),
             laughter_specialist=data.get("laughter_specialist", False),
             allow_partial_scoring=data.get("allow_partial_scoring", False),
+            reframe=data.get("reframe", True),
         )
