@@ -12,8 +12,9 @@ that artifacts on disk are the truth (PLAN.md §3):
     <job_dir>/run.lock   {"pid": ..., "started_at": ..., "stage": ...}
 
 A lock whose pid is gone is stale and gets taken over — a killed process must
-never wedge a job permanently. Liveness is `kill(pid, 0)`, which also reports
-a SIGSTOP-suspended process as alive: a paused job is still owned.
+never wedge a job permanently. Liveness is `kill(pid, 0)` on POSIX, which also
+reports a SIGSTOP-suspended process as alive: a paused job is still owned.
+Windows has no signals and needs the Win32 API instead — see pid_alive().
 """
 
 from __future__ import annotations
@@ -28,6 +29,28 @@ from pathlib import Path
 
 LOCK_NAME = "run.lock"
 
+_IS_WINDOWS = platform.system() == "Windows"
+
+if _IS_WINDOWS:  # the machinery pid_alive() needs; see _pid_alive_windows()
+    import ctypes
+    from ctypes import wintypes
+
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _STILL_ACTIVE = 259
+    _ERROR_ACCESS_DENIED = 5
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    # Signatures declared explicitly: ctypes defaults a return to C int, which
+    # truncates a 64-bit HANDLE — the handle then fails to close and leaks.
+    _kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.GetExitCodeProcess.argtypes = (
+        wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD),
+    )
+    _kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+
 
 class JobBusyError(Exception):
     """Another live process already owns this job."""
@@ -37,11 +60,46 @@ def lock_path(job_dir: Path) -> Path:
     return job_dir / LOCK_NAME
 
 
+def _pid_alive_windows(pid: int) -> bool:
+    """Ask Win32 whether pid is running.
+
+    os.kill() is not a probe on Windows. There are no signals here, so CPython
+    implements it as TerminateProcess() for everything except the two console
+    events — `os.kill(pid, 0)` *kills* pid, with exit code 0. Probing our own
+    lock that way killed the process doing the asking.
+
+    A handle we are refused still proves the pid exists, which matches the
+    EPERM case on POSIX. And a process that has exited but whose handle is
+    still open — a subprocess.Popen the caller has not reaped — opens
+    successfully, so liveness has to come from the exit code, not from whether
+    OpenProcess() returned a handle.
+    """
+    handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
+    try:
+        code = wintypes.DWORD()
+        if not _kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        # A process that genuinely exited with code 259 reads as alive. That
+        # errs toward refusing to take a lock, which is the safe direction:
+        # the cost is a message telling the user to stop the other run, not
+        # two processes writing one job's checkpoints.
+        return code.value == _STILL_ACTIVE
+    finally:
+        _kernel32.CloseHandle(handle)
+
+
 def pid_alive(pid: int) -> bool:
-    """Signal 0 probes existence without delivering anything. EPERM means the
-    pid exists but belongs to someone else — still alive for our purposes."""
+    """Whether pid is a running process — including one that is suspended, or
+    owned by another user. The two platforms need different calls; see
+    _pid_alive_windows() for why os.kill() cannot be used on both."""
     if pid <= 0:
         return False
+    if _IS_WINDOWS:
+        return _pid_alive_windows(pid)
+    # Signal 0 probes existence without delivering anything. EPERM means the
+    # pid exists but belongs to someone else — still alive for our purposes.
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -59,7 +117,7 @@ def pid_paused(pid: int) -> bool:
     There is no portable way to ask this, and no SIGSTOP on Windows at all,
     so a failed probe answers 'not paused' rather than raising.
     """
-    if platform.system() == "Windows" or not pid_alive(pid):
+    if _IS_WINDOWS or not pid_alive(pid):
         return False
     try:
         out = subprocess.run(

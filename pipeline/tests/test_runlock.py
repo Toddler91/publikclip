@@ -51,10 +51,28 @@ def test_stale_lock_is_taken_over(tmp_path):
         assert runlock.owner(job).pid == os.getpid()
 
 
-def test_live_foreign_lock_blocks(tmp_path):
+@pytest.fixture
+def live_foreign_pid():
+    """A pid that is running and is not ours.
+
+    Spawned rather than hardcoded to 1: that is init on Unix, but Windows
+    allocates pids in multiples of four starting at 0, so 1 is never a live
+    process there and the test would pass for the wrong reason.
+    """
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        yield proc.pid
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_live_foreign_lock_blocks(tmp_path, live_foreign_pid):
     job = tmp_path / "job"
     job.mkdir()
-    runlock.lock_path(job).write_text(json.dumps({"pid": 1, "started_at": 0.0}))
+    runlock.lock_path(job).write_text(
+        json.dumps({"pid": live_foreign_pid, "started_at": 0.0})
+    )
     with pytest.raises(runlock.JobBusyError, match="another process"):
         with runlock.hold(job):
             pass
