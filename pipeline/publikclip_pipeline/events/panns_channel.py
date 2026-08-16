@@ -35,6 +35,15 @@ CLASS_MAP: dict[str, str] = {
     "Applause": "applause",
     "Cheering": "cheer",
     "Clapping": "applause",
+    # Gameplay audio. AudioSet separates gunfire by weapon; nothing downstream
+    # uses that distinction, so they collapse to one bus type. Explosion stays
+    # separate — in a shooter it marks a different kind of moment than fire.
+    "Gunshot, gunfire": "gunfire",
+    "Machine gun": "gunfire",
+    "Fusillade": "gunfire",
+    "Artillery fire": "gunfire",
+    "Cap gun": "gunfire",
+    "Explosion": "explosion",
 }
 
 CHUNK_SEC = 30.0
@@ -53,6 +62,16 @@ THRESHOLDS: dict[str, tuple[float, float]] = {
     "shout": (0.15, 0.08),
     "applause": (0.15, 0.08),
     "cheer": (0.15, 0.08),
+    # PROVISIONAL — unlike the figures above, these are not measured. The
+    # conversational numbers come from a real 2 h podcast; no equivalent pass
+    # has been run over game audio. Started at the scream/shout level: game
+    # gunfire is loud and spectrally distinctive, so the likelier error is
+    # these being too low (firing on ambience) than too high. The gameplay
+    # channel scores against a rolling baseline, which tolerates a chatty
+    # detector far better than a silent one, so erring low is the safer side.
+    # Calibrate against a real VOD before trusting the absolute numbers.
+    "gunfire": (0.15, 0.08),
+    "explosion": (0.15, 0.08),
 }
 CONF_SCALE = 0.30
 

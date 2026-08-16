@@ -138,6 +138,7 @@ class CandidatesStage(Stage):
             ),
             "scenes": curve_mod.scenes_channel(scene_times, n),
             "lexical": curve_mod.lexical_channel(segments, n),
+            "gameplay_events": curve_mod.gameplay_events_channel(events["timeline"], n),
         }
         curve, effective_weights = curve_mod.interest_curve(channels)
 

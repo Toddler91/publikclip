@@ -15,15 +15,28 @@ from __future__ import annotations
 
 import numpy as np
 
-# SHAP-anchored channel weights (normalized below).
+# Channel weights, normalized in interest_curve() — ratios, not fractions that
+# must sum to 1.
+#
+# Retuned for solo gameplay with no live audience. The SHAP-anchored table this
+# replaces (arXiv 2512.21402) was fitted on conversational video with a crowd,
+# and two of its strongest channels are structurally dead here rather than
+# merely weak: heatmap needs chat that does not exist, and turns needs a second
+# speaker. interest_curve() would redistribute both away on its own once they
+# came back all-zero — they are pinned at 0 to say so deliberately rather than
+# by accident, and their code paths stay wired for the day there is a crowd.
+#
+# What remains: the streamer's own voice carries most of the signal, and
+# gameplay audio carries the part that does not depend on them reacting to it.
 WEIGHTS = {
-    "heatmap": 0.30,       # real human engagement, when present
-    "dynamics": 0.25,      # energy deviation from local baseline
-    "events": 0.18,        # laughter/gasp/applause density
-    "turns": 0.10,         # conversational back-and-forth rate
-    "arousal": 0.09,
-    "scenes": 0.05,        # visual change rate
-    "lexical": 0.03,
+    "dynamics": 0.34,          # vocal energy — the primary signal now
+    "gameplay_events": 0.22,   # gunfire/explosions, against their own baseline
+    "scenes": 0.16,            # deaths, killcams, respawns
+    "events": 0.14,            # whoops, laughs, shouts
+    "arousal": 0.11,
+    "lexical": 0.03,           # only nudges
+    "heatmap": 0.00,           # no chat
+    "turns": 0.00,             # one speaker
 }
 
 # Compact power-word list (built-in, license-clean). Lexical is the weakest
@@ -38,6 +51,15 @@ POWER_WORDS = {
 }
 
 EVENT_WEIGHTS = {"laugh": 1.0, "gasp": 0.9, "scream": 0.8, "cheer": 0.7, "applause": 0.6, "shout": 0.5}
+
+# Gameplay audio is deliberately absent from EVENT_WEIGHTS above: events_channel
+# skips types it does not know, so gunfire flows to its own channel instead of
+# being counted twice on two different scales.
+GAMEPLAY_EVENT_WEIGHTS = {"gunfire": 1.0, "explosion": 1.0}
+
+# Seconds of context defining "normal" for the gameplay channel. Long enough
+# that a single firefight cannot drag the baseline up around itself.
+GAMEPLAY_BASELINE_SEC = 121
 
 
 def _norm(x: np.ndarray) -> np.ndarray:
@@ -84,6 +106,56 @@ def events_channel(timeline: list[dict], n: int) -> np.ndarray:
         b = min(n, int(np.ceil(event["end"])) + 2)
         out[a:b] = np.maximum(out[a:b], w)
     return out
+
+
+def gameplay_events_channel(
+    timeline: list[dict],
+    n: int,
+    window: int = 10,
+    baseline_sec: int = GAMEPLAY_BASELINE_SEC,
+) -> np.ndarray:
+    """Gameplay audio density measured against its own rolling baseline.
+
+    Presence is the wrong question. In a shooter, gunfire IS the background:
+    scored raw it would mark the entire VOD equally interesting, which is the
+    same as marking none of it. What separates a moment is firing *unlike the
+    surrounding minutes* — a burst out of quiet, or a sudden heavy exchange in
+    a lull. A player camping a quiet corner for ten minutes and then winning a
+    fight should spike; a player in a constant 40-minute firefight should not
+    read as 40 minutes of highlight.
+
+    Median and MAD rather than mean and standard deviation, because the thing
+    being looked for is precisely the outlier — it would inflate both of those
+    and so partly hide itself.
+    """
+    from scipy.ndimage import median_filter
+
+    if n <= 0:
+        return np.zeros(max(0, n))
+
+    density = np.zeros(n)
+    for event in timeline:
+        w = GAMEPLAY_EVENT_WEIGHTS.get(event["type"])
+        if w is None:
+            continue
+        w *= float(event.get("confidence", 1.0))
+        a = max(0, int(event["start"]))
+        b = min(n, int(np.ceil(event["end"])) + 1)
+        if a < b:
+            density[a:b] += w
+    if not density.any():
+        return np.zeros(n)
+
+    density = np.convolve(density, np.ones(window) / window, mode="same")
+    size = max(1, min(n, baseline_sec if baseline_sec % 2 else baseline_sec + 1))
+    baseline = median_filter(density, size=size, mode="nearest")
+    spread = median_filter(np.abs(density - baseline), size=size, mode="nearest")
+    # Stretches of perfectly flat audio have zero spread, which would divide
+    # every deviation into infinity. Fall back to the typical spread elsewhere
+    # in the video so a quiet-then-loud VOD still resolves sensibly.
+    nonzero = spread[spread > 0]
+    floor = float(np.median(nonzero)) if nonzero.size else 1e-6
+    return _norm(np.clip((density - baseline) / np.maximum(spread, floor), 0.0, None))
 
 
 def turns_channel(turns: list[dict], n: int, window: int = 15) -> np.ndarray:
