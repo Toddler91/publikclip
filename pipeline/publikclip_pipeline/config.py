@@ -93,10 +93,12 @@ class Settings:
     allow_partial_scoring: bool = False
     # The camera director crops a 9:16 window out of a wider source and tracks
     # the speaker inside it. A source already shot vertical needs none of that:
-    # the crop's best case is the whole frame unchanged, and its cost is face
-    # detection plus active-speaker analysis on every finalist clip. Off skips
-    # the vision models entirely and renders the frame as shot.
-    reframe: bool = True
+    # the crop's best case is the whole frame unchanged, and its cost is three
+    # vision models plus face detection and active-speaker analysis on every
+    # finalist clip. OFF by default — the sources here are an OBS vertical
+    # canvas already at the render target. Turn it on for horizontal footage,
+    # where the crop is the entire point.
+    reframe: bool = False
 
     def to_json(self) -> dict:
         return {
@@ -121,5 +123,10 @@ class Settings:
             caption_preset=data.get("caption_preset", "classic"),
             laughter_specialist=data.get("laughter_specialist", False),
             allow_partial_scoring=data.get("allow_partial_scoring", False),
+            # Deliberately not the dataclass default. A settings.json written
+            # before this field existed came from a job that reframed, and this
+            # class exists so "a resumed job never silently picks up changed
+            # defaults" — reading those as False would rewrite history for
+            # every job already on disk.
             reframe=data.get("reframe", True),
         )

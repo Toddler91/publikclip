@@ -56,12 +56,19 @@ def _vf(seen):
 
 
 def test_settings_round_trip():
-    s = config.Settings(reframe=False)
-    assert config.Settings.from_json(s.to_json()).reframe is False
+    for value in (True, False):
+        s = config.Settings(reframe=value)
+        assert config.Settings.from_json(s.to_json()).reframe is value
+
+
+def test_new_jobs_do_not_reframe():
+    assert config.Settings().reframe is False
 
 
 def test_settings_default_on_json_without_the_key():
-    """Job dirs written before this existed must keep reframing."""
+    """Deliberately the opposite of the dataclass default: a settings.json with
+    no such key came from a job that reframed, and the snapshot exists so a
+    resumed job never silently picks up a changed default."""
     assert config.Settings.from_json({}).reframe is True
 
 
