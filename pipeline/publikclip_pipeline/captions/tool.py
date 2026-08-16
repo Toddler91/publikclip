@@ -191,6 +191,11 @@ def caption_video(
         )
     emit("captions", 0.95, "Burning captions in…")
     _burn(source, ass_path, out_path, timeout)
+    # Once burned in, the subtitle file is an intermediate. Restyling is nearly
+    # free — the transcript is cached against the job — so keeping it would
+    # only litter the output folder. --ass-only is how you ask to keep it.
+    ass_path.unlink(missing_ok=True)
+    summary["ass_path"] = None
     summary["burned"] = True
     summary["output"] = str(out_path)
     return summary
