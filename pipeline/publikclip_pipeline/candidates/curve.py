@@ -58,8 +58,22 @@ EVENT_WEIGHTS = {"laugh": 1.0, "gasp": 0.9, "scream": 0.8, "cheer": 0.7, "applau
 GAMEPLAY_EVENT_WEIGHTS = {"gunfire": 1.0, "explosion": 1.0}
 
 # Seconds of context defining "normal" for the gameplay channel. Long enough
-# that a single firefight cannot drag the baseline up around itself.
-GAMEPLAY_BASELINE_SEC = 121
+# that a single firefight cannot drag the baseline up around itself: measured
+# engagements run to 48 s at p90 and 123 s at the extreme, so a 121 s window
+# let a long fight suppress its own score. Five minutes keeps the baseline
+# answering "what is normal for this stretch of play" rather than "what is
+# normal for this fight".
+GAMEPLAY_BASELINE_SEC = 301
+
+# Seconds of gunfire density averaged before comparing to the baseline.
+# Detections are short — 1.3 s median, 2.6 s at p90 — because the detector
+# fires on the loudest instants inside a fight rather than tracking it: a
+# measured 33 s engagement produced 4 s of detection across two bursts 19 s
+# apart. Averaging over 30 s bridges those gaps, so a sustained engagement
+# reads as one elevated stretch instead of scattered spikes, and an isolated
+# pop while looting stays small. Wider does not help — at 60 s the smoothing
+# outruns the engagements themselves and buries them.
+GAMEPLAY_WINDOW_SEC = 30
 
 
 def _norm(x: np.ndarray) -> np.ndarray:
@@ -111,7 +125,7 @@ def events_channel(timeline: list[dict], n: int) -> np.ndarray:
 def gameplay_events_channel(
     timeline: list[dict],
     n: int,
-    window: int = 10,
+    window: int = GAMEPLAY_WINDOW_SEC,
     baseline_sec: int = GAMEPLAY_BASELINE_SEC,
 ) -> np.ndarray:
     """Gameplay audio density measured against its own rolling baseline.
