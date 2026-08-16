@@ -301,12 +301,24 @@ def _run_stages_locked(job: Job, stages: Iterable[Stage], progress: ProgressFn) 
     settings = config.Settings.from_json(json.loads(job.settings_json))
     # Libraries we call shell out to a bare `ffmpeg` (whisperX's load_audio),
     # so the managed binary has to be findable by name in every stage — not
-    # only the ones that resolve it explicitly. Ingest downloads it when
-    # missing; on a resumed job ingest is cached and skipped, so point PATH at
-    # whatever is already on disk here.
+    # only the ones that resolve it explicitly.
+    #
+    # ensure_present() rather than add_to_path(): the latter returns quietly
+    # when nothing resolves, and there is a real case where nothing does.
+    # Ingest downloads a static build only when the machine has none, so a job
+    # whose ingest was satisfied by an ffmpeg on PATH leaves nothing on disk.
+    # Resume that job from a process whose PATH no longer has it — an app
+    # launched from an environment predating the install, say — and the first
+    # stage that shells out dies on a bare FileNotFoundError several stages in,
+    # naming nothing. Fetch one here, and say so plainly if that is impossible.
     from ..render import ffmpeg_bin
 
-    ffmpeg_bin.add_to_path()
+    if ffmpeg_bin.ensure_present(lambda f, m: progress("ffmpeg", f, m)) is None:
+        raise StageError(
+            "No usable ffmpeg: none on PATH, none in PUBLIKCLIP_HOME/bin, and "
+            "fetching a static build failed. Install ffmpeg, or point "
+            "PUBLIKCLIP_FFMPEG at one."
+        )
     ctx = StageContext(job=job, settings=settings, progress=progress)
     results: dict[str, dict] = {}
     set_job_status(job.id, "running")

@@ -18,6 +18,17 @@ def isolated_home(tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def stub_ffmpeg(monkeypatch):
+    """run_stages ensures an ffmpeg before any stage runs. These tests are
+    about the queue and never touch media, so keep them off the resolution
+    chain entirely — unstubbed, a machine with no ffmpeg would download one."""
+    from publikclip_pipeline.render import ffmpeg_bin
+
+    monkeypatch.setattr(ffmpeg_bin, "ensure_present", lambda progress=None: "/fake/ffmpeg")
+    yield
+
+
 def _settings_json() -> str:
     return json.dumps(config.Settings().to_json())
 
@@ -136,3 +147,37 @@ def test_failure_then_resume_skips_completed_stages():
     assert counting.runs == 1  # not re-run
     assert results["failing"] == {"ok": True}
     assert queue.get_job(job.id).status == "done"
+
+
+def test_ffmpeg_is_ensured_before_any_stage(monkeypatch):
+    """Fetching, not merely resolving.
+
+    A resumed job serves ingest from its checkpoint, so nothing else in the
+    pass will obtain a binary. Only doing add_to_path() here leaves a machine
+    with none on PATH running the whole pipeline without ffmpeg.
+    """
+    from publikclip_pipeline.render import ffmpeg_bin
+
+    calls: list[str] = []
+
+    def fake_ensure(progress=None):
+        calls.append("ensure")
+        return "/fake/ffmpeg"
+
+    monkeypatch.setattr(ffmpeg_bin, "ensure_present", fake_ensure)
+    job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
+    queue.run_stages(job, [CountingStage()], _noop_progress)
+    assert calls == ["ensure"]
+
+
+def test_missing_ffmpeg_fails_before_any_stage_runs(monkeypatch):
+    """None on PATH, none on disk, none fetchable — say so up front, rather
+    than several stages deep as a bare FileNotFoundError naming nothing."""
+    from publikclip_pipeline.render import ffmpeg_bin
+
+    monkeypatch.setattr(ffmpeg_bin, "ensure_present", lambda progress=None: None)
+    job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
+    stage = CountingStage()
+    with pytest.raises(queue.StageError, match="ffmpeg"):
+        queue.run_stages(job, [stage], _noop_progress)
+    assert stage.runs == 0
