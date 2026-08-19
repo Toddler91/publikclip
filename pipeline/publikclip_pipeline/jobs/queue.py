@@ -16,6 +16,7 @@ half-checkpoint that resume would trust.
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import time
 import uuid
@@ -130,6 +131,47 @@ def set_job_status(job_id: str, status: str, error: str | None = None, title: st
             conn.execute(
                 "UPDATE jobs SET status = ?, error = ? WHERE id = ?", (status, error, job_id)
             )
+
+
+def delete_job(job_id: str, remove_files: bool = True) -> dict:
+    """Forget a job entirely: its rows, and by default its directory.
+
+    Refuses while a live process owns the lock. Deleting checkpoints out from
+    under a running pipeline would leave it writing into a directory nobody
+    will ever read, and the failure would surface somewhere far away from the
+    cause — better to say no here.
+
+    The directory goes before the rows: a job dir with no row is invisible,
+    while a row with no dir is a session the app lists and cannot open.
+    """
+    job = get_job(job_id)
+    if job is None:
+        raise KeyError(job_id)
+
+    owner = runlock.owner(job.dir)
+    if owner is not None:
+        raise runlock.JobBusyError(
+            f"Job {job_id} is running in process {owner.pid}. Stop it first."
+        )
+
+    freed = 0
+    removed = False
+    if remove_files and job.dir.exists():
+        for path in job.dir.rglob("*"):
+            if path.is_file():
+                try:
+                    freed += path.stat().st_size
+                except OSError:
+                    pass
+        shutil.rmtree(job.dir, ignore_errors=True)
+        removed = not job.dir.exists()
+
+    with _connect() as con:
+        con.execute("DELETE FROM stage_runs WHERE job_id = ?", (job_id,))
+        con.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        con.commit()
+
+    return {"id": job_id, "files_removed": removed, "freed_bytes": freed}
 
 
 # ---------------------------------------------------------------------------

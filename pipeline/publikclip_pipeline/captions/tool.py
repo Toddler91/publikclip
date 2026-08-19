@@ -182,6 +182,7 @@ def caption_video(
         "output": None,
     }
     if ass_only:
+        queue.set_job_status(job.id, "done", title=source.stem)
         return summary
 
     if not ffmpeg_bin.supports_captions():
@@ -198,4 +199,7 @@ def caption_video(
     summary["ass_path"] = None
     summary["burned"] = True
     summary["output"] = str(out_path)
+    # Otherwise the row keeps whatever the stage machinery last wrote, and the
+    # app lists a finished caption as a failed session forever.
+    queue.set_job_status(job.id, "done", title=source.stem)
     return summary

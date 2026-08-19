@@ -168,6 +168,27 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
     return 0
 
 
+def cmd_delete(args: argparse.Namespace) -> int:
+    """Forget jobs: their rows, and their directories unless --keep-files."""
+    results, failed = [], 0
+    for job_id in args.job_ids:
+        try:
+            results.append(queue.delete_job(job_id, remove_files=not args.keep_files))
+        except KeyError:
+            print(f"No job {job_id}", file=sys.stderr)
+            failed += 1
+        except runlock.JobBusyError as exc:
+            print(str(exc), file=sys.stderr)
+            failed += 1
+    freed = sum(r["freed_bytes"] for r in results)
+    _emit_result(args.jsonl, {
+        "deleted": [r["id"] for r in results],
+        "freed_mb": round(freed / (1024 * 1024), 1),
+        "failed": failed,
+    })
+    return 1 if failed else 0
+
+
 def cmd_jobs(args: argparse.Namespace) -> int:
     for job in queue.list_jobs():
         stages = queue.stage_statuses(job.id)
@@ -399,6 +420,12 @@ def main(argv: list[str] | None = None) -> int:
     p_cap.add_argument("--ass-only", action="store_true", help="write the .ass subtitle file, do not burn it in")
     p_cap.add_argument("--jsonl", action="store_true", help="machine-readable progress on stdout")
     p_cap.set_defaults(fn=cmd_caption)
+
+    p_del = sub.add_parser("delete", help="delete jobs and their files")
+    p_del.add_argument("job_ids", nargs="+", help="job id(s) to delete")
+    p_del.add_argument("--keep-files", action="store_true", help="forget the job but leave its directory on disk")
+    p_del.add_argument("--jsonl", action="store_true")
+    p_del.set_defaults(fn=cmd_delete)
 
     p_jobs = sub.add_parser("jobs", help="list jobs")
     p_jobs.set_defaults(fn=cmd_jobs)
