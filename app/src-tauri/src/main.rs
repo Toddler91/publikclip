@@ -393,14 +393,67 @@ fn list_job_dirs() -> Result<Vec<Value>, String> {
                 .ok()
                 .and_then(|s| serde_json::from_str::<Value>(&s).ok())
                 .and_then(|v| v["data"]["title"].as_str().map(String::from));
+            // Written by create_job. This scan never opens the database, so
+            // the kind has to be on disk; anything older is a clip job.
+            let kind = fs::read_to_string(dir.join("kind"))
+                .map(|k| k.trim().to_string())
+                .unwrap_or_else(|_| "clip".to_string());
             out.push(json!({
-                "id": id, "title": title,
+                "id": id, "title": title, "kind": kind,
                 "ingested": has_ingest, "rendered": has_render,
             }));
         }
     }
     out.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
     Ok(out)
+}
+
+#[tauri::command]
+fn delete_job(job_id: String) -> Result<(), String> {
+    // Refuses in the pipeline if a live process owns the job, so a running
+    // session cannot be deleted out from under itself.
+    let (program, base_args) = pipeline_invocation();
+    let mut args = base_args.clone();
+    args.push("delete".to_string());
+    args.push(job_id);
+    let out = quiet_command(&program)
+        .args(&args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn run_caption(
+    app: AppHandle,
+    source: String,
+    preset: Option<String>,
+    output: Option<String>,
+    tags: Option<bool>,
+) -> Result<(), String> {
+    let (program, base_args) = pipeline_invocation();
+    std::thread::spawn(move || {
+        let mut args = base_args.clone();
+        args.push("--jsonl".to_string());
+        args.push("caption".to_string());
+        args.push(source);
+        if let Some(p) = preset {
+            args.push("--preset".to_string());
+            args.push(p);
+        }
+        if let Some(o) = output {
+            args.push("-o".to_string());
+            args.push(o);
+        }
+        if tags.unwrap_or(false) {
+            args.push("--tags".to_string());
+        }
+        stream_pipeline(&app, &program, &args, None);
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -645,7 +698,9 @@ fn main() {
             session_states,
             pause_job,
             unpause_job,
-            stop_job
+            stop_job,
+            delete_job,
+            run_caption
         ])
         .setup(|app| {
             let _ = app.get_webview_window("main");

@@ -37,7 +37,10 @@ def _find_existing_job(source: Path) -> queue.Job | None:
     """
     target = str(source.resolve())
     for job in queue.list_jobs(limit=200):
-        if job.source_type == "file" and job.source == target:
+        # Caption jobs only. A clip job for the same file has a transcript we
+        # could reuse, but adopting its directory would retitle it and mark it
+        # done as though the clipping run had finished.
+        if job.kind == "caption" and job.source_type == "file" and job.source == target:
             return job
     return None
 
@@ -131,7 +134,7 @@ def caption_video(
     job = _find_existing_job(source)
     if job is None:
         settings_json = json.dumps(config.Settings().to_json())
-        job = queue.create_job("file", str(source.resolve()), settings_json)
+        job = queue.create_job("file", str(source.resolve()), settings_json, kind="caption")
 
     stages = [IngestStage(), AsrStage()]
     if tags:

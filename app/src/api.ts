@@ -13,6 +13,9 @@ export const api = {
   pauseJob: (jobId: string) => invoke<void>('pause_job', { jobId }),
   unpauseJob: (jobId: string) => invoke<void>('unpause_job', { jobId }),
   stopJob: (jobId: string) => invoke<void>('stop_job', { jobId }),
+  deleteJob: (jobId: string) => invoke<void>('delete_job', { jobId }),
+  runCaption: (source: string, preset: string, output?: string, tags?: boolean) =>
+    invoke<void>('run_caption', { source, preset, output, tags }),
   saveGeminiKey: (key: string) => invoke<boolean>('save_gemini_key', { key }),
   setupState: () => invoke<SetupState>('get_setup_state'),
   markOnboarded: () => invoke<void>('mark_onboarded'),

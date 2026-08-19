@@ -79,9 +79,14 @@ export interface JobResults {
   candidates: { count: number; effective_weights: Record<string, number>; heatmap_present: boolean } | null
 }
 
+export type JobKind = 'clip' | 'caption'
+
 export interface JobSummary {
   id: string
   title: string | null
+  /** 'caption' jobs only transcribe and burn in; they never render clips, so
+   *  they are listed apart and open nothing. Older jobs read as 'clip'. */
+  kind: JobKind
   ingested: boolean
   rendered: boolean
 }

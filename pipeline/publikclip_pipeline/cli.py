@@ -207,6 +207,7 @@ def cmd_sessions(args: argparse.Namespace) -> int:
         rows.append({
             "job_id": job.id,
             "title": job.title,
+            "kind": job.kind,
             "state": queue.job_state(job.id),
             "stage": (lock.stage if lock else None)
             or next((s for s, st in stages.items() if st == "running"), None),

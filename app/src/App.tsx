@@ -184,6 +184,24 @@ export default function App() {
       stages={stages}
       error={runError}
       onRun={startRun}
+      onCaption={(src, preset, output, tags) => {
+        setRunning(true)
+        setRunError(null)
+        setPartial(null)
+        setStages({})
+        setActiveJob(null)
+        api.runCaption(src, preset, output, tags)
+      }}
+      onDelete={async (id) => {
+        try {
+          await api.deleteJob(id)
+        } catch (e) {
+          setRunError(String(e))
+        }
+        // The rail is built from a directory scan, so it only reflects the
+        // deletion once we ask again.
+        refreshJobs()
+      }}
       onOpenLoop={() => setView('loop')}
       onOpenJob={openJob}
       partial={partial}

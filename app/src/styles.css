@@ -1020,3 +1020,52 @@ body {
 .btn-continue:hover:not(:disabled) { background: rgba(255, 178, 36, 0.12); }
 .btn-continue:disabled { opacity: 0.4; cursor: default; }
 .error-note { font-size: 12px; color: var(--dim); }
+
+/* ---------- mode switch: the normal flow vs captions only ---------- */
+.mode-switch {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 18px;
+}
+.mode {
+  background: transparent;
+  border: 1px solid var(--line, #333);
+  color: var(--dim, #888);
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  padding: 7px 16px;
+  cursor: pointer;
+  transition: color 120ms, border-color 120ms, background 120ms;
+}
+.mode:hover:not(:disabled) { color: #ddd; }
+.mode-on {
+  color: var(--amber, #f0a020);
+  border-color: var(--amber, #f0a020);
+  background: rgba(240, 160, 32, 0.08);
+}
+.mode:disabled { opacity: 0.5; cursor: default; }
+
+/* The file picker sits where the URL input does, so it fills the row. */
+.btn-file {
+  flex: 1;
+  text-align: left;
+  background: transparent;
+  border: 1px solid var(--line, #333);
+  color: #ddd;
+  font: inherit;
+  padding: 18px 20px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.btn-file:hover:not(:disabled) { border-color: var(--amber, #f0a020); }
+.btn-file:disabled { opacity: 0.5; cursor: default; }
+
+/* Second heading in the rail, above the caption sessions. */
+.rail-label-2nd { margin-top: 22px; }
+
+/* Delete sits where the transport controls sit for a live session. */
+.ctl-del { color: #666; }
+.ctl-del:hover:not(:disabled) { color: #e05a5a; }

@@ -27,6 +27,8 @@ from typing import Any, Callable, Iterable
 from .. import config
 from . import runlock
 
+KIND_FILE = "kind"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
@@ -36,7 +38,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     title TEXT,
     status TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed
     error TEXT,
-    settings_json TEXT NOT NULL
+    settings_json TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'clip'   -- 'clip' | 'caption'
 );
 CREATE TABLE IF NOT EXISTS stage_runs (
     job_id TEXT NOT NULL,
@@ -61,6 +64,7 @@ class Job:
     status: str
     error: str | None
     settings_json: str
+    kind: str = "clip"
 
     @property
     def dir(self) -> Path:
@@ -72,6 +76,11 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(config.db_path(), timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    # CREATE TABLE IF NOT EXISTS will not add a column to a table that already
+    # exists, so older databases need it grafted on.
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+    if "kind" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'clip'")
     return conn
 
 
@@ -85,24 +94,30 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         status=row["status"],
         error=row["error"],
         settings_json=row["settings_json"],
+        kind=(row["kind"] if "kind" in row.keys() else "clip"),
     )
 
 
-def create_job(source_type: str, source: str, settings_json: str) -> Job:
+def create_job(source_type: str, source: str, settings_json: str, kind: str = "clip") -> Job:
     if source_type not in ("url", "file"):
         raise ValueError(f"bad source_type {source_type!r}")
+    if kind not in ("clip", "caption"):
+        raise ValueError(f"bad kind {kind!r}")
     job_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO jobs (id, created_at, source_type, source, status, settings_json)"
-            " VALUES (?, ?, ?, ?, 'pending', ?)",
-            (job_id, time.time(), source_type, source, settings_json),
+            "INSERT INTO jobs (id, created_at, source_type, source, status, settings_json, kind)"
+            " VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+            (job_id, time.time(), source_type, source, settings_json, kind),
         )
     job = get_job(job_id)
     assert job is not None
     job.dir.mkdir(parents=True, exist_ok=True)
     # Snapshot settings into the job dir so resume never picks up new defaults.
     _atomic_write_json(job.dir / "settings.json", json.loads(settings_json))
+    # Also on disk, because the desktop shell builds its session list by
+    # scanning job dirs and never opens the database.
+    (job.dir / KIND_FILE).write_text(kind, encoding="utf-8")
     return job
 
 
