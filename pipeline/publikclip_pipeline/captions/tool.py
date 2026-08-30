@@ -84,23 +84,66 @@ def _words_for(segments: list[dict]) -> list[ass_mod.Word]:
     return words
 
 
-def _burn(source: Path, ass_path: Path, out_path: Path, timeout: float) -> None:
+# A caption burn re-encodes the whole source, not a 40 s clip, so it does not
+# get the clip renderer's settings. `medium` on a 14 min 1080p file is tens of
+# minutes of CPU to re-compress footage whose only change is text on top.
+BURN_PRESET = "veryfast"
+BURN_CRF = 20
+
+
+def _burn(
+    source: Path,
+    ass_path: Path,
+    out_path: Path,
+    timeout: float,
+    duration: float | None = None,
+    emit=None,
+) -> None:
+    """Burn the subtitles in, reporting progress against the source duration.
+
+    ffmpeg is asked for machine-readable progress on stdout: without it this
+    step is a single silent stretch that on a long source runs for the better
+    part of an hour, which reads as a hang rather than as work.
+    """
+    stderr_path = out_path.with_suffix(".burn.log")
     args = [
-        ffmpeg_bin.ffmpeg(), "-y", "-v", "error", "-i", str(source),
+        ffmpeg_bin.ffmpeg(), "-y", "-v", "error",
+        "-progress", "pipe:1", "-nostats",
+        "-i", str(source),
         # Explicit: these sources carry up to six OBS audio tracks, and an
         # unqualified selection silently picks one of them.
         "-map", "0:v:0", "-map", "0:a:0",
         "-vf", f"subtitles=filename={renderer._q(ass_path)}"  # noqa: SLF001
                f":fontsdir={renderer._q(ass_mod.FONTS_DIR)}",  # noqa: SLF001
-        "-c:v", "libx264", "-preset", "medium", "-crf", str(renderer.X264_CRF),
+        "-c:v", "libx264", "-preset", BURN_PRESET, "-crf", str(BURN_CRF),
         "-pix_fmt", "yuv420p",
         "-c:a", "copy",
         "-movflags", "+faststart",
         str(out_path),
     ]
-    proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    with open(stderr_path, "w", encoding="utf-8") as errfile:
+        proc = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=errfile, text=True, bufsize=1
+        )
+        try:
+            for line in proc.stdout or ():
+                key, _, value = line.strip().partition("=")
+                if key == "out_time_us" and emit and duration and value.isdigit():
+                    done = int(value) / 1_000_000
+                    emit("captions", min(0.99, done / duration),
+                         f"Burning captions in… {done / 60:.1f}/{duration / 60:.1f} min")
+            proc.wait(timeout=timeout)
+        except Exception:
+            proc.kill()
+            raise
+    detail = ""
+    try:
+        detail = stderr_path.read_text(encoding="utf-8")[-800:]
+    except OSError:
+        pass
+    stderr_path.unlink(missing_ok=True)
     if proc.returncode != 0:
-        raise CaptionError(f"Burn-in failed: {(proc.stderr or '')[-800:]}")
+        raise CaptionError(f"Burn-in failed: {detail.strip()}")
 
 
 def caption_video(
@@ -111,6 +154,7 @@ def caption_video(
     ass_only: bool = False,
     progress=None,
     timeout: float = 7200.0,
+    on_job=None,
 ) -> dict:
     """Transcribe `source` and return it captioned. Returns a small summary."""
     from ..asr.stage import AsrStage
@@ -135,6 +179,8 @@ def caption_video(
     if job is None:
         settings_json = json.dumps(config.Settings().to_json())
         job = queue.create_job("file", str(source.resolve()), settings_json, kind="caption")
+    if on_job:
+        on_job(job)
 
     stages = [IngestStage(), AsrStage()]
     if tags:
@@ -194,7 +240,8 @@ def caption_video(
             f"The subtitle file is written: {ass_path}"
         )
     emit("captions", 0.95, "Burning captions in…")
-    _burn(source, ass_path, out_path, timeout)
+    _burn(source, ass_path, out_path, timeout,
+          duration=float(probe.get("duration_sec") or 0) or None, emit=emit)
     # Once burned in, the subtitle file is an intermediate. Restyling is nearly
     # free — the transcript is cached against the job — so keeping it would
     # only litter the output folder. --ass-only is how you ask to keep it.

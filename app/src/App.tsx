@@ -95,13 +95,17 @@ export default function App() {
         setRunning(false)
         refreshJobs()
         setPartial(payload.ok ? null : payload.partial ?? null)
-        if (payload.ok && activeJobRef.current) {
+        if (!payload.ok) {
+          setRunError(String(payload.error ?? 'Pipeline failed'))
+        } else if (payload.kind === 'caption') {
+          // One finished video, not a set of clips — there is no review to
+          // open, and asking for clip results would fail.
+          setActiveJob(null)
+        } else if (activeJobRef.current) {
           api.jobResults(activeJobRef.current).then((r) => {
             setResults(r)
             setView('review')
           })
-        } else if (!payload.ok) {
-          setRunError(String(payload.error ?? 'Pipeline failed'))
         }
       } else if (payload.event === 'exited') {
         setRunning(false)

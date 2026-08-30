@@ -92,6 +92,17 @@ def cmd_caption(args: argparse.Namespace) -> int:
         print("caption: a source file is required", file=sys.stderr)
         return 2
 
+    if args.jsonl:
+        # Sidecar mode: exit if the app reading our stdout goes away, rather
+        # than re-encoding an hour of video for nobody.
+        supervise.die_with_parent()
+
+    def announce(job: queue.Job) -> None:
+        if args.jsonl:
+            print(json.dumps({
+                "event": "job", "job_id": job.id, "dir": str(job.dir), "kind": "caption",
+            }), flush=True)
+
     try:
         summary = caption_tool.caption_video(
             Path(args.source),
@@ -100,14 +111,16 @@ def cmd_caption(args: argparse.Namespace) -> int:
             tags=args.tags,
             ass_only=args.ass_only,
             progress=_progress_printer(args.jsonl),
+            on_job=announce,
         )
-    except caption_tool.CaptionError as exc:
-        if args.jsonl:
-            print(json.dumps({"event": "error", "message": str(exc)}), flush=True)
-        else:
+    except (caption_tool.CaptionError, queue.StageError, runlock.JobBusyError) as exc:
+        # The shell reads `ok` to tell a finished run from a failed one; without
+        # it every result, including a good one, reads as a failure.
+        _emit_result(args.jsonl, {"ok": False, "kind": "caption", "error": str(exc)})
+        if not args.jsonl:
             print(f"caption: {exc}", file=sys.stderr)
         return 1
-    _emit_result(args.jsonl, summary)
+    _emit_result(args.jsonl, {"ok": True, "kind": "caption", **summary})
     return 0
 
 
@@ -379,8 +392,12 @@ def cmd_ig(args: argparse.Namespace) -> int:
     return 2
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="publikclip")
+    # Global on purpose, and it must stay the only declaration: a subparser
+    # that also defines --jsonl overwrites this one with its own default, so
+    # `publikclip --jsonl <cmd>` silently loses the flag and the desktop
+    # shell -- which invokes it exactly that way -- receives nothing.
     parser.add_argument("--jsonl", action="store_true", help="machine-readable progress on stdout")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -419,13 +436,11 @@ def main(argv: list[str] | None = None) -> int:
         help="also detect laughter/gasps for [laughs] tags (adds an audio-event pass)",
     )
     p_cap.add_argument("--ass-only", action="store_true", help="write the .ass subtitle file, do not burn it in")
-    p_cap.add_argument("--jsonl", action="store_true", help="machine-readable progress on stdout")
     p_cap.set_defaults(fn=cmd_caption)
 
     p_del = sub.add_parser("delete", help="delete jobs and their files")
     p_del.add_argument("job_ids", nargs="+", help="job id(s) to delete")
     p_del.add_argument("--keep-files", action="store_true", help="forget the job but leave its directory on disk")
-    p_del.add_argument("--jsonl", action="store_true")
     p_del.set_defaults(fn=cmd_delete)
 
     p_jobs = sub.add_parser("jobs", help="list jobs")
@@ -473,7 +488,11 @@ def main(argv: list[str] | None = None) -> int:
     p_report.add_argument("--metric", default="views")
     p_ig.set_defaults(fn=cmd_ig)
 
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     return args.fn(args)
 
 

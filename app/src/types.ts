@@ -13,6 +13,7 @@ export interface PipelineEvent {
   fraction?: number
   message?: string
   job_id?: string
+  kind?: JobKind
   ok?: boolean
   error?: string
   [key: string]: unknown
